@@ -681,7 +681,8 @@
     return pageKind() === 'mse';
   }
 
-  /** 为什么用不了双向模式。按播放方式给具体原因，而不是一律说「不支持」。 */
+  /** 为什么用不了双向模式。直连媒体（hls / direct）有独立链路、不走这里，
+   *  正常调用只会命中 none / unknown / stream —— 后两个 case 是防御性的。 */
   function whyNoEnhanced() {
     switch (pageKind()) {
       case 'none':
@@ -690,10 +691,8 @@
         return '视频还没开始加载。先点一下播放，播几秒再试。';
       case 'stream':
         return '这个页面播的是实时媒体流（MediaStream），音频不经过 MSE，双向模式用不了。延迟模式仍可用。';
-      case 'hls':
-        return '视频地址是 .m3u8 直连（原生 HLS），数据在浏览器内部，JS 拿不到。双向模式用不了，延迟模式仍可用。';
       default:
-        return '视频是整段文件直连，音频数据不经过 MSE，双向模式用不了。延迟模式仍可用。';
+        return '双向模式没有覆盖这种播放方式。请刷新页面重试，若仍复现请反馈。';
     }
   }
 
@@ -749,9 +748,20 @@
     }
     if (enhAudio.paused) enhAudio.play().catch(function () {});
 
-    const want = videoEl.currentTime + currentMs / 1000;
-    if (!bufferedHas(want)) return;
-    if (Math.abs(enhAudio.currentTime - want) > 0.04) {
+    /* currentMs 的语义是「音频延迟量」：正值 = 声音比画面晚，负值 = 提前。
+       所以 audio 要播的位置是 video.currentTime - currentMs/1000：
+       currentMs=-3000 → audio 跑到画面前面 3 秒的内容 → 观众提前 3 秒听到。 */
+    const want = videoEl.currentTime - currentMs / 1000;
+    if (bufferedHas(want)) {
+      if (Math.abs(enhAudio.currentTime - want) > 0.04) {
+        try { enhAudio.currentTime = want; } catch (e) {}
+      }
+      return;
+    }
+
+    /* 目标位置还没缓冲到。离得远就先 seek 过去 —— media element 的 seek
+       会自己驱动加载那一段；离得近就原地等缓冲追上，别来回跳。 */
+    if (Math.abs(enhAudio.currentTime - want) > 2.5) {
       try { enhAudio.currentTime = want; } catch (e) {}
     }
   }
@@ -760,27 +770,39 @@
     const v = pickVideo();
     if (!v) { showToast('这个页面没有找到视频元素'); return; }
 
-    if (!hookReady) {
-      showToast(pageIsMSE()
-        ? '还没截到音频轨，先让视频播放几秒再点。'
-        : whyNoEnhanced());
-      return;
-    }
+    const kind = pageKind();
+    /* 直连媒体（原生 HLS / mp4 等）：不需要截获页面的数据，直接让浏览器
+       再解码一遍同一路流。媒体元素加载不受 CORS 约束，也不需要站点权限。 */
+    const viaSrc = kind === 'hls' || kind === 'direct';
 
-    if (!chunks.length) {
-      showToast('音频片段还没攒到，先让视频播放几秒再试。');
-      return;
+    if (!viaSrc) {
+      if (!hookReady) {
+        showToast(pageIsMSE()
+          ? '还没截到音频轨，先让视频播放几秒再点。'
+          : whyNoEnhanced());
+        return;
+      }
+
+      if (!chunks.length) {
+        showToast('音频片段还没攒到，先让视频播放几秒再试。');
+        return;
+      }
     }
 
     videoEl = v;
-    enhMS = new MediaSource();
-    /* 标记一下，inject-main 那边看到就会跳过，避免自己截自己 */
-    enhMS.__adsOwn = true;
-
     enhAudio = document.createElement('audio');
-    enhAudio.src = URL.createObjectURL(enhMS);
     enhAudio.style.display = 'none';
     document.documentElement.appendChild(enhAudio);
+
+    if (viaSrc) {
+      /* 同一条 m3u8 再播一遍，只取声音。代价是双倍带宽和解码。 */
+      enhAudio.src = v.currentSrc || v.src;
+    } else {
+      enhMS = new MediaSource();
+      /* 标记一下，inject-main 那边看到就会跳过，避免自己截自己 */
+      enhMS.__adsOwn = true;
+      enhAudio.src = URL.createObjectURL(enhMS);
+    }
 
     let settled = false;
 
@@ -824,24 +846,29 @@
       syncTick();
     }
 
-    /* 4 秒还没任何可播数据，说明这条轨是空的（典型：原生 HLS 页面） */
+    /* MSE 路线 4 秒没数据说明轨是空的；HLS 路线要解析 playlist + 拉首个切片，
+       慢一点，放宽到 10 秒。超时都完整回滚，视频保持原样。 */
     const guard = setTimeout(function () {
-      rollback('没截到可用的音频数据，已放弃双向模式，视频声音保持原样。');
-    }, 4000);
+      rollback(viaSrc
+        ? '音频流加载超时，已放弃双向模式，视频声音保持原样。'
+        : '没截到可用的音频数据，已放弃双向模式，视频声音保持原样。');
+    }, viaSrc ? 10000 : 4000);
 
     enhAudio.addEventListener('loadedmetadata', activate);
     enhAudio.addEventListener('canplay', activate);
 
-    enhMS.addEventListener('sourceopen', function () {
-      try {
-        enhBuf = enhMS.addSourceBuffer(audioMime || 'audio/mp4; codecs="mp4a.40.2"');
-        enhBuf.addEventListener('updateend', pump);
-        for (const c of chunks) appendQueue.push(c);
-        pump();
-      } catch (e) {
-        rollback('音频轨初始化失败：' + ((e && e.message) || e));
-      }
-    });
+    if (!viaSrc) {
+      enhMS.addEventListener('sourceopen', function () {
+        try {
+          enhBuf = enhMS.addSourceBuffer(audioMime || 'audio/mp4; codecs="mp4a.40.2"');
+          enhBuf.addEventListener('updateend', pump);
+          for (const c of chunks) appendQueue.push(c);
+          pump();
+        } catch (e) {
+          rollback('音频轨初始化失败：' + ((e && e.message) || e));
+        }
+      });
+    }
   }
 
   function exitEnhanced() {
@@ -918,6 +945,14 @@
       return;
     }
 
+    /* 直连媒体：浏览器自己就能解码，直接拉一路，不依赖截获和授权 */
+    const kind = pageKind();
+    if (kind === 'hls' || kind === 'direct') {
+      modeBtn.textContent = '启用双向';
+      modeBtn.title = '用同一条流的音频再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量';
+      return;
+    }
+
     if (!hookInstalled) {
       if (permGranted) {
         modeBtn.textContent = '刷新页面生效';
@@ -930,7 +965,6 @@
     }
 
     /* 脚本装上了却没截到音频轨：要么还没开始播，要么根本不是 MSE */
-    const kind = pageKind();
     if (kind === 'mse') {
       modeBtn.textContent = '等待音频轨';
       modeBtn.title = '播放器还没往 MSE 里写音频，先让视频播放几秒';
@@ -949,6 +983,12 @@
     if (enhanced) { exitEnhanced(); return; }
 
     if (hookReady) { enterEnhanced(); return; }
+
+    /* 直连媒体：不用截获、不用授权，直接拉一路 */
+    {
+      const k = pageKind();
+      if (k === 'hls' || k === 'direct') { enterEnhanced(); return; }
+    }
 
     if (hookInstalled) {
       showToast(pageIsMSE()

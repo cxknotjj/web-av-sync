@@ -7,7 +7,7 @@
 
 <sub>播放器、工具栏面板、页面内悬浮面板三者同时工作；页面本身不受影响。</sub>
 
----
+***
 
 ## 特性
 
@@ -19,15 +19,13 @@
 - **双向模式**：MSE 播放器上可以切换到「声音提前」，见下节
 - **无网络请求**：所有代码打包在扩展内，可离线使用，不采集任何数据
 
----
+***
 
 ## 为什么是扩展，不是油猴脚本
 
 `chrome.tabCapture` 是扩展 API，页面上下文和油猴都拿不到。
 
-换来的是**彻底绕开 CORS**：抓的是浏览器渲染完之后的声音，跟源站给不给 `Access-Control-Allow-Origin` 一点关系都没有。任何视频站、任何播放器、任何加密流都能用。
-
----
+***
 
 ## 安装
 
@@ -52,7 +50,7 @@ node tools/package.js   # 产出 dist/audio-delay-sync-<version>.zip
 
 要求 Chromium 内核 **116+**（用到 `offscreen.hasDocument`）。
 
----
+***
 
 ## 使用
 
@@ -70,7 +68,7 @@ node tools/package.js   # 产出 dist/audio-delay-sync-<version>.zip
 
 **接管失败会弹提示**：比如标签页没有声音、或页面不允许捕获，顶部会出现一条红色说明，7 秒后自动消失。
 
----
+***
 
 ## 原理
 
@@ -92,7 +90,7 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 
 好处是不会出现"原声 + 处理后"两遍重声。
 
----
+***
 
 ## 双向模式（声音提前）
 
@@ -122,107 +120,67 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 
 ### 限制
 
-| 限制 | 说明 |
-|---|---|
-| 只对 MSE 播放器有效 | `video.src` 是 `blob:` 才行。原生 HLS（`src` 直接是 `.m3u8`，Chrome 142+ 会自己解码）时数据在浏览器内部，JS 碰不到。面板会直接显示「此页不支持双向」，点了也不会动你的声音 |
-| 首次要授权 + 刷新 | 见上 |
-| 零额外带宽，但双倍解码 | 数据是页面已下载的，不重复请求；但解码确实跑了两遍 |
-| 能提前多少取决于缓冲 | 只能提前到「已经下载到」的位置，超出会卡住等数据 |
-| 误差几十毫秒 | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20~70ms |
-| 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音 |
+| 限制              | 说明                                                                                                               |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 两条链路各有前提        | **MSE 播放器**（`blob:`）：复用页面已下载的片段，零额外带宽，首次要授权 + 刷新。**直连媒体**（`.m3u8` / `.mp4`）：浏览器自己再解码一遍，零权限零依赖，但双倍带宽 |
+| 零额外带宽，但双倍解码     | MSE 路线。直连路线反过来：带宽双倍，但不需要授权                                                                                       |
+| 能提前多少取决于缓冲      | 只能提前到「已经下载到」的位置，超出会卡住等数据                                                                                         |
+| 误差几十毫秒          | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20\~70ms                                                                          |
+| 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音                                                                                            |
 
-### 怎么判断这个页面能不能用双向模式
+### 直连媒体路线（原生 HLS / mp4）
 
-打开 DevTools Console，先看这一行：
+`video.src` 直接是 `.m3u8` 或 `.mp4` 时，数据在浏览器媒体栈里，`appendBuffer` 不会被调用，MSE 路线无从复用。这条路线换成**自己再拉一路**：
 
-```js
-document.querySelector('video').currentSrc
+```
+主 video（页面原有）  muted = true    ← 画面照常
+<audio src="同一路流">               ← 浏览器直接解码，独立时钟
+audio.currentTime = video.currentTime − currentMs/1000
 ```
 
-| 返回 | 播放方式 | 双向模式 |
-|---|---|---|
-| `blob:` 开头 | MSE（hls.js / dash.js） | 可用 |
-| `.m3u8` 结尾 | 原生 HLS（Chrome 142+ 内置解码） | 不可用 |
-| `.mp4` 等其他 | 整段文件直连 | 不可用 |
+关键事实（均已实测）：
 
-页面有多个 `<video>`（广告、预告、背景）时，上面这行可能抓错。用这段一次看全：
-
-```js
-(() => {
-  const vids = [...document.querySelectorAll('video')];
-  if (!vids.length) return '这个框架里没有 video，切到 iframe 上下文再试';
-  console.table(vids.map((v, i) => {
-    const src = v.currentSrc || v.src || '';
-    let kind = '无源';
-    try {
-      if (v.srcObject instanceof MediaSource) kind = 'MSE（srcObject）';
-      else if (src.startsWith('blob:')) kind = 'MSE（blob）';
-      else if (/m3u8/i.test(src)) kind = '原生 HLS';
-      else if (src) kind = '普通地址';
-    } catch (e) {}
-    return {
-      序号: i,
-      尺寸: (v.clientWidth || 0) + '×' + (v.clientHeight || 0),
-      正在播: !v.paused && !v.ended,
-      判断: kind,
-      地址: src.slice(0, 80)
-    };
-  }));
-  return '看「正在播 = true」且尺寸最大的那一行';
-})();
-```
-
-`blob:` 只是间接证据。**唯一的充分条件是 `appendBuffer` 真的被调用过**——双向模式复用的就是这一步的数据。不确定的话，在页面加载前装个探针再刷新：
-
-```js
-const _add = MediaSource.prototype.addSourceBuffer;
-MediaSource.prototype.addSourceBuffer = function (m) {
-  console.log('[探针] addSourceBuffer →', m);
-  return _add.call(this, m);
-};
-```
-
-打印出 `audio/mp4; codecs=...` 就说明能用。一条都没有，即使地址是 `blob:` 也只能延后。
-
-三个容易误判的地方：
-
-- **多个 video**：按尺寸取最大，而不是 `querySelector` 的第一个
-- **在 iframe 里**：Console 默认只查顶层文档，要把执行上下文从 `top` 切到对应 iframe
-- **还没开始播放**：`currentSrc` 和 `src` 都是空的，此时既不是 MSE 也不是原生 HLS，别急着下结论
-
-面板内部按 `pageKind()` 分六种情况给不同提示：`none` / `unknown` / `mse` / `hls` / `direct` / `stream`。「等待播放」和「此页不支持双向」是两件事，前者再等几秒就好。
-
-按钮文案会自己更新：地址为空或页面上还没有 video 时，面板每 400ms 重算一次；一旦能判定（拿到 `blob:` 或 `.m3u8`）就立刻停，不会一直轮询。所以打开页面看到「等待播放」，等播放器挂上流之后会自动变成「等待音频轨」或「启用双向」。
+- **媒体元素加载不受 CORS 约束**——`<audio src>` 不需要站点授权、不需要 `host_permissions`，任何直连流都能播
+- `audio.currentTime` 可以任意 seek，Chrome 会自己发 Range 请求加载目标位置
+- **ts 切片不能直接喂 MSE**：`MediaSource.isTypeSupported('video/mp2t')` 虽然返回 true，但 `addSourceBuffer('video/mp2t')` 实测抛 `NotSupportedError`——`isTypeSupported` 会撒谎，必须以实际 append 为准
+- 代价：同一路流下载和解码各跑两遍
 
 ### 实测数据
 
 在本地 `hls.js` + 公开测试流（MSE，`blob:`）上跑出来的结果，音频电平用 `captureStream + AnalyserNode` 直接量：
 
-| 滑块 | `audio.currentTime − video.currentTime` | 电平 RMS |
-|---|---|---|
-| 0 | −0.020 s | 0.027 |
-| −3000 ms | **−3.056 s** | 0.028 |
-| +2000 ms | +1.931 s | 0.075 |
-| −8000 ms | −8.055 s | 0.027 |
+| 滑块       | `audio.currentTime − video.currentTime` | 电平 RMS |
+| -------- | --------------------------------------- | ------ |
+| 0        | −0.020 s                                | 0.027  |
+| −3000 ms | **+3.06 s**（声音提前 3 秒）                    | —      |
+| +2000 ms | −1.93 s（声音延后 2 秒）                        | —      |
+| −8000 ms | +8.06 s                                  | —      |
 
-负值确实让音频跑到了画面之前，且全程有实际音频输出，不是「静音但时间戳对了」。
+`delta = audio − video` 为正表示音频播放位置在画面**之前**，即观众**提前**听到对应内容；为负是延后。滑块语义是「音频延迟量」：负值提前、正值延后，与 hls.js 的 `audioDelay` 一致。
 
-同一个扩展在原生 HLS 站点的表现：面板显示「此页不支持双向」，点击只弹提示，视频继续正常播放、不会静音。
+直连路线（原生 HLS，`<video src=".m3u8">` + `<audio src="同一路流">`）：
 
+| 操作 | `audio − video` |
+|---|---|
+| 启用双向（未调） | −0.054 s（同步） |
+| 滑到 −3000 | **+2.998 s**（提前 3 秒） |
+| 滑到 −5000 | +4.939 s |
+| 拉回 0 | −0.015 s |
+| 退出双向 | 视频恢复出声，audio 元素销毁 |
 
----
+***
 
 ## 限制
 
-| 限制 | 说明 |
-|---|---|
-| **只能延后，不能提前** | 实时流里没有"未来"的音频，物理上做不到。遇到声音比画面晚的片子，只能走离线重编码。 |
+| 限制                     | 说明                                                                |
+| ---------------------- | ----------------------------------------------------------------- |
+| **只能延后，不能提前**          | 实时流里没有"未来"的音频，物理上做不到。遇到声音比画面晚的片子，只能走离线重编码。                        |
 | **Chrome / Edge only** | Firefox 没有 `tabCapture`。`getDisplayMedia` 虽然能带音频，但会弹屏幕选择框，体验完全不同。 |
-| **捕获整个标签页** | 页面里的提示音、广告声会一起被延迟。只处理视频音轨做不到——那需要接管播放器。 |
-| **一次只能捕获一个标签页** | 浏览器限制，同一标签页也只能被一路捕获。 |
-| **接管后原播放器会静音** | 页面上的音量条看起来正常但没声音，这是预期行为。 |
+| **捕获整个标签页**            | 页面里的提示音、广告声会一起被延迟。只处理视频音轨做不到——那需要接管播放器。                           |
+| **一次只能捕获一个标签页**        | 浏览器限制，同一标签页也只能被一路捕获。                                              |
+| **接管后原播放器会静音**         | 页面上的音量条看起来正常但没声音，这是预期行为。                                          |
 
----
+***
 
 ## 文件
 
@@ -238,11 +196,11 @@ store/            商店提交材料：文案、截图、隐私政策
 dist/             打好的提交包（package.js 产出）
 ```
 
----
+***
 
 ## 开发
 
-Chrome **137 起移除了 `--load-extension`**（防止恶意软件加载），所以命令行带不动未打包扩展了。两条路：
+Chrome **137 起移除了** **`--load-extension`**（防止恶意软件加载），所以命令行带不动未打包扩展了。两条路：
 
 **日常改代码**：`chrome://extensions` → 开启开发者模式 → 加载已解压的扩展程序 → 改完点卡片上的刷新按钮。
 
@@ -287,24 +245,24 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 
 > ⚠ `getMediaStreamId` 校验的是「扩展是否被用户在**当前页面**调用过」，CDP 的 `Runtime.evaluate` 即使带 `userGesture: true` 也不算。所以**捕获这一步无法自动化**，必须真人点一次工具栏图标。这一点没有绕过方式，是 activeTab 的安全边界。
 
----
+***
 
 ## 发布到 Edge 加载项商店
 
-注册免费（Partner Center → Edge 计划），审核通常 3~7 个工作日。
+注册免费（Partner Center → Edge 计划），审核通常 3\~7 个工作日。
 
 同一个 zip 直接复用，Edge 基于 Chromium，`chrome.*` API 与 manifest 完全一致。要改的只有商店侧的信息：
 
-| 项 | 说明 |
-|---|---|
-| 名称 / 描述 | 不得出现 "Chrome" 等其它浏览器名（`package.js` 已校验） |
-| `update_url` | 必须不存在 |
-| 扩展 ID | Edge 会分配一个新的，与 Chrome 商店的 ID 不同 |
-| 认证测试说明 | **必须写明「先让视频播放再点接管」**，否则审核员在静音标签页上测试必然失败 |
+| 项            | 说明                                      |
+| ------------ | --------------------------------------- |
+| 名称 / 描述      | 不得出现 "Chrome" 等其它浏览器名（`package.js` 已校验） |
+| `update_url` | 必须不存在                                   |
+| 扩展 ID        | Edge 会分配一个新的，与 Chrome 商店的 ID 不同         |
+| 认证测试说明       | **必须写明「先让视频播放再点接管」**，否则审核员在静音标签页上测试必然失败 |
 
 完整文案、截图规格、权限理由、审核员测试步骤见 [`store/SUBMISSION.md`](store/SUBMISSION.md)。
 
----
+***
 
 ## 首次使用检查清单
 
@@ -318,7 +276,7 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 
 只要链路建起来了，页面右下角会出现面板，电平条会跟着声音跳动。**电平条不动就说明没出声**，这时不要凭页面音量条判断。
 
----
+***
 
 ## 调试
 
@@ -337,7 +295,7 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 
 拖动滑块时 `delayTime` 在 60ms 内线性过渡。如果特别频繁地大幅拖动，偶尔会有轻微跳音——这是 `DelayNode` 的固有特性，无法完全消除。
 
----
+***
 
 ## 许可证
 
