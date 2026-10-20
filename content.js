@@ -613,6 +613,7 @@
 
   function destroy() {
     if (enhanced) exitEnhanced();
+    stopModeWatch();
     document.removeEventListener('fullscreenchange', syncFullscreen, true);
     try { host.remove(); } catch (e) {}
     window.__adsPanel = null;
@@ -867,6 +868,33 @@
   }
 
   function updateModeUI() {
+    paintModeUI();
+
+    /* 视频地址从「空」变成 blob:/m3u8 只发生一次，但没有任何事件能可靠捕获
+       （播放器可能在任意时刻给 video 赋 src，SPA 还可能稍后才插入 video）。
+       unknown / none 都算「还没有定论」，需要轮询；其余状态一次就能判死。 */
+    const k = pageKind();
+    if (hookInstalled && !hookReady && !enhanced && (k === 'unknown' || k === 'none')) startModeWatch();
+    else stopModeWatch();
+  }
+
+  let modeTimer = null;
+
+  function startModeWatch() {
+    if (modeTimer) return;
+    modeTimer = setInterval(function () {
+      /* 先重绘再判断要不要停：地址刚出现的那一次，正是需要刷新文案的时候 */
+      paintModeUI();
+      const k = pageKind();
+      if (!hookInstalled || hookReady || enhanced || (k !== 'unknown' && k !== 'none')) stopModeWatch();
+    }, 400);
+  }
+
+  function stopModeWatch() {
+    if (modeTimer) { clearInterval(modeTimer); modeTimer = null; }
+  }
+
+  function paintModeUI() {
     if (!modeTag || !modeBtn) return;
     modeTag.textContent = enhanced ? '双向' : '延迟';
     modeTag.classList.toggle('enh', enhanced);

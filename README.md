@@ -192,6 +192,8 @@ MediaSource.prototype.addSourceBuffer = function (m) {
 
 面板内部按 `pageKind()` 分六种情况给不同提示：`none` / `unknown` / `mse` / `hls` / `direct` / `stream`。「等待播放」和「此页不支持双向」是两件事，前者再等几秒就好。
 
+按钮文案会自己更新：地址为空或页面上还没有 video 时，面板每 400ms 重算一次；一旦能判定（拿到 `blob:` 或 `.m3u8`）就立刻停，不会一直轮询。所以打开页面看到「等待播放」，等播放器挂上流之后会自动变成「等待音频轨」或「启用双向」。
+
 ### 实测数据
 
 在本地 `hls.js` + 公开测试流（MSE，`blob:`）上跑出来的结果，音频电平用 `captureStream + AnalyserNode` 直接量：
