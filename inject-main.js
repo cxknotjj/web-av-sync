@@ -70,5 +70,13 @@
     return sb;
   };
 
+  /* content.js 可能比本脚本晚就绪，早发的 track 会丢。
+     它初始化后会来问一次，这里如实回答当前状态。 */
+  window.addEventListener('message', function (e) {
+    const m = e.data;
+    if (!m || m.__ads !== true || m.type !== 'query') return;
+    post({ type: 'state', mime: audioMime });
+  });
+
   post({ type: 'ready' });
 })();

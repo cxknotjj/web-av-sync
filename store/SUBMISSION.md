@@ -90,7 +90,7 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 
 ## 几点必须提前说清楚的限制
 
-- **只能延后，不能提前。** 实时音频流里没有"未来"的样本，物理上做不到让声音提前。如果你的情况是声音比画面早，需要走离线重新编码，本扩展帮不上。
+- **默认模式只能延后。** 实时音频流里没有"未来"的样本，物理上做不到让声音提前。如果页面用的是 MSE 播放器（`video.src` 是 `blob:`），可以切到可选的「双向模式」：复用页面已经下载的音频片段，这时才能提前。原生 HLS（地址直接是 `.m3u8`）由浏览器内部解码，扩展拿不到数据，面板会直接写明不支持，不会假装可用。
 - **捕获的是整个标签页。** 页面里的广告声、提示音会一起被延迟。只挑视频音轨做不到——那需要接管播放器本身。
 - **接管期间，页面自己的音量条看起来正常但没有声音。** 这是浏览器的强制行为（捕获后标签页静音），不是 bug。声音从扩展这条链路出来。
 - **一次只能接管一个标签页。**
@@ -142,7 +142,7 @@ While hovering over the panel: `←` / `→` for 100 ms, `Shift + ←/→` for 1
 
 ## Known limitations
 
-- **Delay only, never advance.** A live stream has no future samples — it is physically impossible to advance audio in real time. If your audio is *ahead* of the picture, you need offline re-encoding.
+- **Delay only in the default mode.** Tab audio is captured after mixing, so there are no future samples to pull forward — advancing audio in real time is impossible on that path. On pages that use Media Source Extensions, the optional bidirectional mode reuses the audio segments the page already downloaded and can therefore advance it. It is unavailable on native HLS (where `video.src` is an `.m3u8` URL and the browser demuxes internally), and the panel says so instead of pretending otherwise.
 - **The whole tab is captured.** Ads and notification sounds on the page get delayed too.
 - **The page's own volume slider looks normal but is silent while captured.** This is browser-enforced behavior, not a bug.
 - **One tab at a time.**

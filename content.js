@@ -121,6 +121,10 @@
    * chunks 缓存页面自己拉到的音频片段。限制总字节数，避免长片把内存吃满。
    */
   let enhanced = false;
+  /* hookInstalled：MAIN world 的脚本装上了
+     hookReady：真的截到了 audio 轨（收到 track 消息）。
+     两者必须分开 —— 原生 HLS 页面 hook 装得上，但永远截不到东西。 */
+  let hookInstalled = false;
   let hookReady = false;
   let audioMime = '';
   const chunks = [];
@@ -604,6 +608,18 @@
     return best || document.querySelector('video');
   }
 
+  /** 页面是不是 MSE 播放器（blob: 地址）。
+   *  原生 HLS / 直连 mp4 的音频数据不经过 JS，双向模式无从复用。 */
+  function pageIsMSE() {
+    const v = pickVideo();
+    if (!v) return false;
+    /* 少数播放器直接把 MediaSource 挂到 srcObject 上，地址栏里看不到 blob: */
+    try {
+      if (v.srcObject && typeof MediaSource !== 'undefined' && v.srcObject instanceof MediaSource) return true;
+    } catch (e) {}
+    return String(v.currentSrc || v.src || '').indexOf('blob:') === 0;
+  }
+
   function pushChunk(buf) {
     if (!(buf instanceof ArrayBuffer) || !buf.byteLength) return;
 
@@ -667,7 +683,17 @@
     const v = pickVideo();
     if (!v) { showToast('这个页面没有找到视频元素'); return; }
 
-    if (!hookReady) { showToast('还没有截到音频轨。确认页面用的是 MSE 播放器，并刷新一次页面。'); return; }
+    if (!hookReady) {
+      showToast(pageIsMSE()
+        ? '还没截到音频轨，先让视频播放几秒再点。'
+        : '这个页面的视频是直连地址，音频不经过 JS，双向模式用不了。');
+      return;
+    }
+
+    if (!chunks.length) {
+      showToast('音频片段还没攒到，先让视频播放几秒再试。');
+      return;
+    }
 
     videoEl = v;
     enhMS = new MediaSource();
@@ -679,6 +705,56 @@
     enhAudio.style.display = 'none';
     document.documentElement.appendChild(enhAudio);
 
+    let settled = false;
+
+    /* 任何一步没跑通都走这里：把音频元素拆掉，视频从头到尾没被静音过 */
+    function rollback(msg) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+
+      if (enhAudio) {
+        try { enhAudio.pause(); } catch (e) {}
+        try { enhAudio.removeAttribute('src'); enhAudio.load(); } catch (e) {}
+        try { enhAudio.remove(); } catch (e) {}
+      }
+      enhAudio = null;
+      enhMS = null;
+      enhBuf = null;
+      appendQueue = [];
+      videoEl = null;
+      enhanced = false;
+      updateModeUI();
+      showToast(msg);
+    }
+
+    /* 确认音频轨真有数据，才敢动视频的静音开关 */
+    function activate() {
+      if (settled) return;
+      /* 没有真实数据时不要提前落定，留给后面的 canplay 再来一次 */
+      if (!enhAudio || !(enhAudio.buffered.length || isFinite(enhAudio.duration))) return;
+
+      settled = true;
+      clearTimeout(guard);
+
+      v.muted = true;
+      enhanced = true;
+      setValue(currentMs);
+      updateModeUI();
+
+      if (syncTimer) clearInterval(syncTimer);
+      syncTimer = setInterval(syncTick, 250);
+      syncTick();
+    }
+
+    /* 4 秒还没任何可播数据，说明这条轨是空的（典型：原生 HLS 页面） */
+    const guard = setTimeout(function () {
+      rollback('没截到可用的音频数据，已放弃双向模式，视频声音保持原样。');
+    }, 4000);
+
+    enhAudio.addEventListener('loadedmetadata', activate);
+    enhAudio.addEventListener('canplay', activate);
+
     enhMS.addEventListener('sourceopen', function () {
       try {
         enhBuf = enhMS.addSourceBuffer(audioMime || 'audio/mp4; codecs="mp4a.40.2"');
@@ -686,18 +762,9 @@
         for (const c of chunks) appendQueue.push(c);
         pump();
       } catch (e) {
-        showToast('音频轨初始化失败：' + ((e && e.message) || e));
+        rollback('音频轨初始化失败：' + ((e && e.message) || e));
       }
     });
-
-    v.muted = true;
-    enhanced = true;
-    setValue(currentMs);
-    updateModeUI();
-
-    if (syncTimer) clearInterval(syncTimer);
-    syncTimer = setInterval(syncTick, 250);
-    syncTick();
   }
 
   function exitEnhanced() {
@@ -736,12 +803,30 @@
 
     if (enhanced) {
       modeBtn.hidden = true;
-    } else if (hookReady) {
-      modeBtn.hidden = false;
+      return;
+    }
+
+    modeBtn.hidden = false;
+
+    if (hookReady) {
       modeBtn.textContent = '启用双向';
-    } else {
-      modeBtn.hidden = false;
+      modeBtn.title = '复用页面已经下载的音频片段，支持负值（声音提前）';
+      return;
+    }
+
+    if (!hookInstalled) {
       modeBtn.textContent = '双向需授权';
+      modeBtn.title = '需要当前站点的访问权限，授权后刷新一次页面';
+      return;
+    }
+
+    /* 脚本装上了却没截到音频轨：要么还没开始播，要么根本不是 MSE */
+    if (!pageIsMSE()) {
+      modeBtn.textContent = '此页不支持双向';
+      modeBtn.title = '视频地址是直连的（原生 HLS 或 mp4），音频数据不经过 JS，无法复用';
+    } else {
+      modeBtn.textContent = '等待音频轨';
+      modeBtn.title = '播放器还没往 MSE 里写音频，先让视频播放几秒';
     }
   }
 
@@ -749,6 +834,13 @@
     if (enhanced) { exitEnhanced(); return; }
 
     if (hookReady) { enterEnhanced(); return; }
+
+    if (hookInstalled) {
+      showToast(pageIsMSE()
+        ? '还没截到音频轨，先让视频播放几秒再点。'
+        : '这个页面的视频是直连地址（原生 HLS），音频不经过 JS，双向模式用不了。延迟模式仍然可用。');
+      return;
+    }
 
     /* 还没 hook：先问 background 要站点权限，授权后刷新页面才生效 */
     try {
@@ -773,12 +865,21 @@
     if (!m || m.__ads !== true) return;
 
     if (m.type === 'ready') {
-      hookReady = true;
+      hookInstalled = true;
       updateModeUI();
       return;
     }
     if (m.type === 'track') {
       if (m.mime) audioMime = m.mime;
+      hookInstalled = true;
+      hookReady = true;
+      updateModeUI();
+      return;
+    }
+    if (m.type === 'state') {
+      hookInstalled = true;
+      if (m.mime) { audioMime = m.mime; hookReady = true; }
+      updateModeUI();
       return;
     }
     if (m.type === 'chunk') {
@@ -820,6 +921,9 @@
   tip.textContent = '只延后声音，不影响画面';
   updateModeUI();
 
+  /* MAIN world 可能已经先跑完了，问一次它当前截到了什么 */
+  try { window.postMessage({ __ads: true, type: 'query' }, '*'); } catch (e) {}
+
   /* 面板有可能比 panel-show 消息更晚就绪，主动拉一次真实状态。
      如果那边其实已经没在接管，就不要再挂个空面板误导人。
      例外：被注册成增强脚本注入时（DOM 上有标记），面板要留着当双向模式的入口。 */
@@ -832,7 +936,7 @@
         return;
       }
       if (document.documentElement.dataset.adsHooked === '1') {
-        hookReady = true;
+        hookInstalled = true;
         api.reveal();
         updateModeUI();
         return;

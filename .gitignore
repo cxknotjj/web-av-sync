@@ -19,3 +19,6 @@ npm-debug.log*
 # 本地环境变量（本扩展不需要，但防止以后误提交）
 .env
 .env.local
+
+# 真机测试脚手架：临时扩展副本 + hls.js + 测试流页面，只在本机用
+test-env/
