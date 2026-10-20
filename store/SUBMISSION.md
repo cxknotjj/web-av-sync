@@ -230,8 +230,13 @@ Injects a single content script into the tab the user already granted via active
 **debugger**
 
 ```
-OPTIONAL — used only when the user enables the optional bidirectional mode on a page
-that plays native HLS.
+Note: this permission is declared in "permissions", not "optional_permissions" —
+Chromium does not permit "debugger" to be optional. Its two install warnings are
+therefore shown up front even though the code path below is only reachable when the
+user turns on bidirectional mode.
+
+When the permission is used: only after the user clicks "enable bidirectional" on a
+page that plays native HLS.
 
 Purpose: read audio data the page's own player has already downloaded. When
 video.src is an .m3u8 URL, Chrome's built-in demuxer consumes the .ts segments
