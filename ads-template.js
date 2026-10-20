@@ -250,6 +250,52 @@ window.ADS_STYLE = {
     .mode-btn:hover { color: #e6edf3; border-color: rgba(255, 255, 255, .26); }
     .mode-btn[hidden] { display: none; }
 
+    /* 双向链路指示条：虚线 = 还没启用、只是预告；实线高亮 = 正在走这条 */
+    .route {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin: 6px 0 0;
+      padding: 3px 7px;
+      border-radius: 4px;
+      border: 1px dashed rgba(255, 255, 255, .1);
+      background: rgba(255, 255, 255, .025);
+      font-size: 10px;
+      line-height: 1.5;
+      color: #6b7280;
+    }
+
+    .route[hidden] { display: none; }
+
+    .route.on {
+      border-style: solid;
+      border-color: rgba(34, 211, 238, .3);
+      background: rgba(34, 211, 238, .09);
+      color: #a8c4ce;
+    }
+
+    .route-id {
+      flex: none;
+      width: 12px;
+      text-align: center;
+      color: inherit;
+      opacity: .75;
+    }
+
+    .route-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .route-meta {
+      flex: none;
+      font-variant-numeric: tabular-nums;
+      opacity: .85;
+    }
+
     .meter {
       height: 2px;
       margin-top: 9px;
@@ -318,6 +364,11 @@ window.ADS_STYLE = {
         <div class="mode">
           <span class="mode-tag" data-el="modeTag">延迟</span>
           <button class="mode-btn" data-act="mode" data-el="modeBtn" hidden>启用双向</button>
+        </div>
+        <div class="route" data-el="route" hidden>
+          <span class="route-id" data-el="routeId"></span>
+          <span class="route-name" data-el="routeName"></span>
+          <span class="route-meta" data-el="routeMeta"></span>
         </div>
         <div class="meter"><div class="bar" data-el="bar"></div></div>
         <div class="foot">

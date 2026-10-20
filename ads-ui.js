@@ -78,6 +78,10 @@
   const tip = shadow.querySelector('[data-el="tip"]');
   const modeTag = shadow.querySelector('[data-el="modeTag"]');
   const modeBtn = shadow.querySelector('[data-el="modeBtn"]');
+  const routeBox = shadow.querySelector('[data-el="route"]');
+  const routeId = shadow.querySelector('[data-el="routeId"]');
+  const routeName = shadow.querySelector('[data-el="routeName"]');
+  const routeMeta = shadow.querySelector('[data-el="routeMeta"]');
 
   /* ---------------- 状态 ---------------- */
 
@@ -129,6 +133,28 @@
     modeBtn.textContent = text || '';
     modeBtn.title = title || '';
     modeBtn.hidden = !!hidden;
+  }
+
+  /** 双向链路指示条。info 为 null 时整条隐藏。
+   *  on=false 是「将要走这条」的预告（虚线），on=true 是「正在走」（实线）。 */
+  function setRoute(info) {
+    if (!info) {
+      routeBox.hidden = true;
+      routeBox.removeAttribute('title');
+      return;
+    }
+    routeBox.hidden = false;
+    routeBox.classList.toggle('on', !!info.on);
+    routeBox.title = info.hint || '';
+    routeId.textContent = info.id || '';
+    routeName.textContent = info.name || '';
+    routeMeta.textContent = info.meta || '';
+  }
+
+  /** 只改右侧那截动态数字（可提前多少秒），别整条重建 */
+  function setRouteMeta(text) {
+    if (routeBox.hidden) return;
+    if (routeMeta.textContent !== text) routeMeta.textContent = text || '';
   }
 
   function setTip(text) {
@@ -332,6 +358,8 @@
 
     setModeTag: setModeTag,
     setModeBtn: setModeBtn,
+    setRoute: setRoute,
+    setRouteMeta: setRouteMeta,
     setTip: setTip,
 
     /** 双向模式：放开负半轴，并告诉这一层「延迟不用再发给 SW」 */

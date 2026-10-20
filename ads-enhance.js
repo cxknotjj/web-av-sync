@@ -19,6 +19,31 @@
 
   const MAX_CHUNK_BYTES = 48 * 1024 * 1024;
 
+  /* 三条链路的展示元数据。面板上那一行「走哪一路」全靠这张表：
+     id 是编号，meta 是代价，hint 是悬停解释。
+     想加链路就在这儿加一条，判断逻辑在 pickRoute()。 */
+  const ROUTES = {
+    mse: {
+      id: '①',
+      name: '复用页面切片',
+      meta: '零流量',
+      hint: '播放器用 MSE 播放，音频片段已经在 appendBuffer 里被截下来了，直接复用，不额外下载'
+    },
+    capture: {
+      id: '②',
+      name: '抓取已下载切片',
+      meta: '零流量',
+      hint: '原生 HLS：靠调试协议取回播放器已经下过的 ts 切片，不额外下载。' +
+        '代价是浏览器顶部会显示「正在调试此浏览器」，且用户自己开着 DevTools 时会失败'
+    },
+    src: {
+      id: '③',
+      name: '重新拉一路',
+      meta: '约双倍流量',
+      hint: '同一条流再解码一遍只取声音。不需要授权、不需要刷新，但下载量大约翻倍'
+    }
+  };
+
   /* ---------------- 状态 ---------------- */
 
   let ui = null;
@@ -51,7 +76,6 @@
   let capBytes = 0;           /* 已经解出多少音频字节，用来判断「真有数据了」 */
 
   /* ---------------- 页面探测 ---------------- */
-
   function pickVideo() {
     let best = null;
     let bestArea = 0;
@@ -86,6 +110,15 @@
 
   function pageIsMSE() {
     return pageKind() === 'mse';
+  }
+
+  /** 这次会走哪条链路。面板预告和真正分派共用这一份判断，
+   *  否则两边各写一套，早晚会说「预告走 ①」然后实际跑 ③。 */
+  function pickRoute(kind) {
+    if (hookReady && chunks.length) return 'mse';
+    if (kind === 'hls' && typeof muxjs !== 'undefined') return 'capture';
+    if (kind === 'hls' || kind === 'direct') return 'src';
+    return '';
   }
 
   /** 为什么用不了双向模式。直连媒体（hls / direct）有独立链路、不走这里，
@@ -149,6 +182,8 @@
   function syncTick() {
     if (!enhanced || !videoEl || !enhAudio) return;
     pump();
+    /* 顺手把「还能提前多少」刷到面板上 */
+    paintRouteMeta();
 
     /* 视频暂停时音频也要停，否则声音会跑到画面前面 */
     if (videoEl.paused) {
@@ -236,6 +271,7 @@
   function startMseReuse(v) {
     enhMode = 'mse';
     videoEl = v;
+    paintRoute();
 
     enhAudio = document.createElement('audio');
     enhAudio.style.display = 'none';
@@ -278,6 +314,7 @@
     videoEl = v;
     capInitDone = false;
     capBytes = 0;
+    paintRoute();
 
     const fallback = function () {
       const keep = videoEl;
@@ -359,6 +396,7 @@
     enhMode = 'src';
     videoEl = v;
     capBytes = 0;
+    paintRoute();
 
     enhAudio = document.createElement('audio');
     enhAudio.style.display = 'none';
@@ -388,16 +426,16 @@
       return;
     }
 
-    const kind = pageKind();
+    const route = pickRoute(pageKind());
 
     /* ① 页面自己在用 MSE（hls.js / shaka），切片已经躺在 appendBuffer 里了 */
-    if (hookReady && chunks.length) { startMseReuse(v); return; }
+    if (route === 'mse') { startMseReuse(v); return; }
 
     /* ② 原生 HLS：没有 appendBuffer 可钩，只能走调试协议 */
-    if (kind === 'hls' && typeof muxjs !== 'undefined') { startNativeCapture(v); return; }
+    if (route === 'capture') { startNativeCapture(v); return; }
 
     /* ③ 直连媒体：自己再拉一路 */
-    if (kind === 'hls' || kind === 'direct') { startViaSrc(v); return; }
+    if (route === 'src') { startViaSrc(v); return; }
 
     if (ui) {
       ui.showToast(hookReady
@@ -445,11 +483,47 @@
 
   /* ---------------- 模式文案 ---------------- */
 
+  /** 链路指示条。虚线 = 还没跑起来（预告或正在连），实线 = 已经在出声 */
+  function paintRoute() {
+    if (!ui) return;
+
+    /* enhMode 一旦有值就说明这条链路已经选定，哪怕还没落定也要按它显示。
+       此时不能再走 pickRoute() 预告，否则 ② 降级到 ③ 的过程中，
+       面板会一直挂着「将用 ②」，跟实际跑的对不上。 */
+    const r = ROUTES[enhMode] || ROUTES[pickRoute(pageKind())];
+    if (!r) { ui.setRoute(null); return; }
+
+    ui.setRoute({
+      id: r.id,
+      /* 「将用」是给还没点的用户看的，分清预告和生效 */
+      name: enhMode ? r.name : '将用 ' + r.name,
+      /* 链路选定了但还没出声（在等数据、等降级），别让用户以为已经生效 */
+      meta: enhMode && !enhanced ? '连接中…' : r.meta,
+      hint: r.hint,
+      on: enhanced
+    });
+
+    if (enhanced) paintRouteMeta();
+  }
+
+  /** 右侧那截动态数字：音频已经缓冲到画面之后多少秒，也就是最多还能提前多少。
+   *  三条链路喂进 MSE 时都保留了原始时间戳，所以可以直接和 video.currentTime 相减。 */
+  function paintRouteMeta() {
+    if (!ui || !enhAudio || !videoEl) return;
+    const r = ROUTES[enhMode];
+    if (!r) return;
+
+    const b = enhAudio.buffered;
+    const ahead = b.length ? Math.max(0, b.end(b.length - 1) - videoEl.currentTime) : 0;
+    ui.setRouteMeta(r.meta + ' · 可提前 ' + ahead.toFixed(1) + 's');
+  }
+
   function paintModeUI() {
     if (!ui) return;
 
     ui.setTip(enhanced ? '负值让声音提前 · 滚轮可调' : '只延后声音 · 滚轮可调');
     ui.setModeTag(enhanced ? '双向' : '延迟', enhanced);
+    paintRoute();
 
     if (enhanced) {
       ui.setModeBtn('', '', true);
