@@ -66,7 +66,15 @@ function makeEnv(opts) {
       executeScript: async () => {
         if (env.injectFails) throw new Error('Cannot access a chrome:// URL');
         log.push('inject');
-      }
+      },
+      getRegisteredContentScripts: async () => [],
+      unregisterContentScripts: async () => {},
+      registerContentScripts: async (scripts) => { log.push('register:' + scripts.length); }
+    },
+    permissions: {
+      getAll: async () => ({ origins: [] }),
+      contains: async () => false,
+      request: async () => false
     },
     tabCapture: {
       getMediaStreamId: async (opt) => {

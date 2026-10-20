@@ -260,6 +260,92 @@ async function flashBadge(tabId) {
   } catch (e) {}
 }
 
+/* ---------------- 增强模式（MSE 双路解码） ----------------
+ *
+ * 页面自己用 MSE 播放时，音频片段会经过 SourceBuffer.appendBuffer。
+ * inject-main.js 在 MAIN world 劫持那个点，把片段复制一份出来，content.js
+ * 用另一条只含音频的 MediaSource 接住 —— 于是音频有了**独立时钟**，
+ * currentTime 可以设到画面位置之后，这就是「声音提前」。
+ *
+ * 权限：需要在目标站点上跑 content script，且必须 document_start 注入
+ * （否则拿不到 init segment）。用 optional_host_permissions，安装时不申请
+ * 任何网站权限，用户主动启用时才按站点授权。
+ */
+
+const ENHANCED_IDS = ['ads-main', 'ads-content'];
+
+async function hasOriginPermission(origin) {
+  try {
+    return await chrome.permissions.contains({ origins: [origin + '/*'] });
+  } catch (e) {
+    return false;
+  }
+}
+
+async function registerEnhanced(origins) {
+  try {
+    const old = await chrome.scripting.getRegisteredContentScripts({ ids: ENHANCED_IDS });
+    if (old && old.length) await chrome.scripting.unregisterContentScripts({ ids: ENHANCED_IDS });
+  } catch (e) {}
+
+  const matches = origins.map(function (o) { return o.replace(/\/\*$/, '') + '/*'; });
+  if (!matches.length) return;
+
+  await chrome.scripting.registerContentScripts([
+    {
+      id: 'ads-main',
+      matches: matches,
+      js: ['inject-main.js'],
+      runAt: 'document_start',
+      world: 'MAIN',
+      allFrames: false
+    },
+    {
+      id: 'ads-content',
+      matches: matches,
+      js: ['content.js'],
+      runAt: 'document_start',
+      allFrames: false
+    }
+  ]);
+}
+
+/** 把所有已授权站点一次性注册进去 */
+async function rebuildEnhanced() {
+  const perms = await chrome.permissions.getAll();
+  const origins = ((perms && perms.origins) || []).filter(function (o) {
+    return /^https?:/i.test(o);
+  });
+  await registerEnhanced(origins);
+}
+
+/**
+ * 请求当前站点权限并注册注入脚本。
+ * 必须在用户手势里触发 —— 从面板按钮过来可能已经丢了手势，
+ * 所以失败时给一句能操作的提示，让用户去扩展页手动授权。
+ */
+async function requestEnhance(origin) {
+  if (!origin || !/^https?:/i.test(origin)) {
+    return { ok: false, error: '这个页面不支持（只对 http / https 站点生效）' };
+  }
+
+  try {
+    if (!(await hasOriginPermission(origin))) {
+      const granted = await chrome.permissions.request({ origins: [origin + '/*'] });
+      if (!granted) {
+        return { ok: false, error: '没有拿到站点权限。可以在扩展管理页的「网站访问权限」里手动设为允许。' };
+      }
+    }
+    await rebuildEnhanced();
+    return { ok: true, needsReload: true };
+  } catch (e) {
+    return { ok: false, error: '授权失败：' + ((e && e.message) || String(e)) };
+  }
+}
+
+/* 每次 SW 启动把已授权站点重新注册一遍（浏览器可能清掉动态脚本） */
+rebuildEnhanced().catch(function () {});
+
 /* ---------------- 消息路由 ---------------- */
 
 function sendToTab(tabId, msg) {
@@ -305,6 +391,9 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       return true;
     case 'getState':
       getState().then(sendResponse);
+      return true;
+    case 'requestEnhance':
+      requestEnhance(msg.origin).then(sendResponse);
       return true;
     default:
       return false;

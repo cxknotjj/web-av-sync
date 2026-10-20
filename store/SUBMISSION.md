@@ -184,8 +184,10 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 ### Single purpose（单一用途）
 
 ```
-把当前标签页的音频延迟一个用户设定的时长，用于修正视频音画不同步。
+把当前标签页的音频延迟（或提前）一个用户设定的时长，用于修正视频音画不同步。
 ```
+
+> 两个模式（默认的 tabCapture 延迟、可选的双向偏移）服务于同一个用途：调整当前标签页的音画相对时序。不是两个功能。
 
 ### Permission justification（逐条权限理由）
 
@@ -219,6 +221,18 @@ Grants temporary host access to the current tab only at the moment the user clic
 
 ```
 Injects a single content script into the tab the user already granted via activeTab: a floating panel with an <input type="range"> so the delay can be adjusted during fullscreen video, plus a small banner that explains capture failures (for example "this tab is not playing audio"). Injection failure is caught and ignored — the toolbar icon shows a red badge instead, and the audio pipeline is never affected. No page data is read.
+```
+
+**optional_host_permissions (`*://*/*`)**
+
+```
+OPTIONAL — never granted at install. After installation the extension shows "no website access" and works on any site using only activeTab.
+
+This permission backs the optional bidirectional mode, and is requested per-origin only after the user clicks the "启用双向" (enable bidirectional) button on the panel and confirms the browser prompt. Its sole purpose is to register a document_start script on that one site, which copies audio segments that the page's own player has ALREADY downloaded (the page uses Media Source Extensions, so segments pass through SourceBuffer.appendBuffer).
+
+Why it is technically required: MediaSource.appendBuffer runs at document_start, before the extension can be invoked by a user gesture. Without a pre-registered script the very first segment is missed and the audio track can never be initialised.
+
+No page content is read, no request is made, nothing is transmitted. The copied bytes stay in memory and are fed to a local MediaSource belonging to the extension. If the user never uses the bidirectional mode, no host permission is ever granted.
 ```
 
 ### Remote code（是否使用远程代码）

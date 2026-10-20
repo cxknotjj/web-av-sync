@@ -18,6 +18,8 @@
 
   const HOST_ID = 'audio-delay-sync-panel';
   const MAX_MS = 10000;
+  /* 双向模式才有负半轴：tabCapture 拿的是播放输出，没有未来样本 */
+  const MIN_ENH_MS = -10000;
 
   /* ---------------- 错误提示 ----------------
    * 与主面板完全独立：接管失败时主面板会因 getState 返回 inactive 而自我
@@ -114,6 +116,22 @@
   let dragging = false;
   let dragDX = 0;
   let dragDY = 0;
+
+  /* ---------------- 双向模式状态 ----------------
+   * chunks 缓存页面自己拉到的音频片段。限制总字节数，避免长片把内存吃满。
+   */
+  let enhanced = false;
+  let hookReady = false;
+  let audioMime = '';
+  const chunks = [];
+  let chunkBytes = 0;
+  const MAX_CHUNK_BYTES = 48 * 1024 * 1024;
+  let enhMS = null;
+  let enhAudio = null;
+  let enhBuf = null;
+  let appendQueue = [];
+  let syncTimer = null;
+  let videoEl = null;
 
   const host = document.createElement('div');
   host.id = HOST_ID;
@@ -230,9 +248,11 @@
       input[type="range"]::-webkit-slider-runnable-track {
         height: 3px;
         border-radius: 2px;
+        /* 两段填充：从 0 点向上界画，negative 时就是中点往左 */
         background: linear-gradient(to right,
-          rgba(34,211,238,.85) 0, rgba(34,211,238,.85) var(--fill, 0%),
-          rgba(255,255,255,.12) var(--fill, 0%), rgba(255,255,255,.12) 100%);
+          rgba(255,255,255,.12) 0%, rgba(255,255,255,.12) var(--lo, 50%),
+          rgba(34,211,238,.85) var(--lo, 50%), rgba(34,211,238,.85) var(--hi, 50%),
+          rgba(255,255,255,.12) var(--hi, 50%), rgba(255,255,255,.12) 100%);
       }
 
       input[type="range"]::-webkit-slider-thumb {
@@ -264,6 +284,41 @@
       }
 
       .steps button:hover { color: #e6edf3; background: rgba(255, 255, 255, .1); }
+
+      .mode {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 7px 0 0;
+      }
+
+      .mode-tag {
+        padding: 2px 7px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, .06);
+        color: #8b949e;
+        font-size: 10px;
+      }
+
+      .mode-tag.enh {
+        background: rgba(34, 211, 238, .16);
+        color: #22d3ee;
+      }
+
+      .mode-btn {
+        margin-left: auto;
+        padding: 3px 9px;
+        font-size: 10px;
+        font-family: inherit;
+        color: #8b949e;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, .12);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .mode-btn:hover { color: #e6edf3; border-color: rgba(255, 255, 255, .26); }
+      .mode-btn[hidden] { display: none; }
 
       .meter {
         height: 2px;
@@ -322,13 +377,17 @@
           <span class="num" data-el="num">0.000</span>
           <span class="unit">s</span>
         </div>
-        <input type="range" min="0" max="10000" step="100" value="0" data-el="slider">
+        <input type="range" min="-10000" max="10000" step="100" value="0" data-el="slider">
         <div class="steps">
           <button data-step="-1000">−1s</button>
           <button data-step="-100">−100</button>
           <button data-step="0">归零</button>
           <button data-step="100">+100</button>
           <button data-step="1000">+1s</button>
+        </div>
+        <div class="mode">
+          <span class="mode-tag" data-el="modeTag">延迟</span>
+          <button class="mode-btn" data-act="mode" data-el="modeBtn" hidden>启用双向</button>
         </div>
         <div class="meter"><div class="bar" data-el="bar"></div></div>
         <div class="foot">
@@ -345,21 +404,28 @@
   const num = shadow.querySelector('[data-el="num"]');
   const bar = shadow.querySelector('[data-el="bar"]');
   const tip = shadow.querySelector('[data-el="tip"]');
+  const modeTag = shadow.querySelector('[data-el="modeTag"]');
+  const modeBtn = shadow.querySelector('[data-el="modeBtn"]');
 
   /* ---------------- 渲染 ---------------- */
 
   function clampMs(v) {
     const n = Number(v);
     if (!isFinite(n)) return 0;
-    return Math.min(MAX_MS, Math.max(0, Math.round(n)));
+    /* 只有双向模式才放行负值：tabCapture 没有未来样本，负延迟是假的 */
+    const lo = enhanced ? MIN_ENH_MS : 0;
+    return Math.min(MAX_MS, Math.max(lo, Math.round(n)));
   }
 
   function setValue(ms) {
     currentMs = clampMs(ms);
     slider.value = String(currentMs);
     num.textContent = (currentMs / 1000).toFixed(3);
-    num.className = 'num' + (currentMs > 0 ? ' pos' : '');
-    slider.style.setProperty('--fill', (currentMs / MAX_MS * 100).toFixed(1) + '%');
+    num.className = 'num' + (currentMs !== 0 ? ' pos' : '');
+    /* 滑块物理范围固定 -10000..10000，0 点落在 50% */
+    const pct = (currentMs + 10000) / 20000 * 100;
+    slider.style.setProperty('--lo', Math.min(pct, 50).toFixed(2) + '%');
+    slider.style.setProperty('--hi', Math.max(pct, 50).toFixed(2) + '%');
   }
 
   function paintMeter(rms) {
@@ -414,8 +480,14 @@
       return;
     }
     if (act === 'stop' || act === 'close') {
+      if (enhanced) exitEnhanced();
       chrome.runtime.sendMessage({ target: 'sw', type: 'stop' }).catch(function () {});
       destroy();
+      return;
+    }
+    if (act === 'mode') {
+      onModeClick();
+      return;
     }
   });
 
@@ -490,6 +562,7 @@
   /* ---------------- 生命周期 ---------------- */
 
   function destroy() {
+    if (enhanced) exitEnhanced();
     document.removeEventListener('fullscreenchange', syncFullscreen, true);
     try { host.remove(); } catch (e) {}
     window.__adsPanel = null;
@@ -507,9 +580,211 @@
     setDelay: setValue,
     setMeter: paintMeter,
     destroy: destroy,
-    toast: showToast
+    toast: showToast,
+    updateMode: updateModeUI
   };
   window.__adsPanel = api;
+
+  /* ---------------- 双向模式（复用页面 MSE 音频） ----------------
+   *
+   * 页面用 MSE 播放时，inject-main.js 会把每个音频片段复制一份丢过来。
+   * 这里用一条只有音频的 MediaSource 接住，让浏览器自己解码出声。
+   *
+   * 关键：这条 audio 有自己的时钟，currentTime 可以设到 video 当前位置之后，
+   * 因为 buffer 里存着「已经下载但还没播」的数据。这就是负延迟的来源。
+   */
+
+  function pickVideo() {
+    let best = null;
+    let bestArea = 0;
+    document.querySelectorAll('video').forEach(function (v) {
+      const area = (v.clientWidth || 0) * (v.clientHeight || 0);
+      if (area > bestArea) { bestArea = area; best = v; }
+    });
+    return best || document.querySelector('video');
+  }
+
+  function pushChunk(buf) {
+    if (!(buf instanceof ArrayBuffer) || !buf.byteLength) return;
+
+    chunks.push(buf);
+    chunkBytes += buf.byteLength;
+
+    /* 太老的片段自己丢掉：留着也只会让内存一路涨上去 */
+    while (chunkBytes > MAX_CHUNK_BYTES && chunks.length > 2) {
+      chunkBytes -= chunks.shift().byteLength;
+    }
+
+    if (enhanced) appendChunk(buf);
+  }
+
+  function appendChunk(buf) {
+    appendQueue.push(buf);
+    pump();
+  }
+
+  function pump() {
+    if (!enhBuf || enhBuf.updating || !appendQueue.length) return;
+    if (enhMS && enhMS.readyState !== 'open') return;
+    const next = appendQueue.shift();
+    try {
+      enhBuf.appendBuffer(next);
+    } catch (e) {
+      /* 片段被拒（时间戳不连续之类）就丢掉，别让队列卡死 */
+      setTimeout(pump, 0);
+    }
+  }
+
+  /** 目标时间点是否落在已缓冲范围里，不在就别 seek，否则会卡住等数据 */
+  function bufferedHas(t) {
+    if (!enhAudio) return false;
+    const b = enhAudio.buffered;
+    for (let i = 0; i < b.length; i++) {
+      if (t >= b.start(i) + 0.05 && t <= b.end(i) - 0.15) return true;
+    }
+    return false;
+  }
+
+  function syncTick() {
+    if (!enhanced || !videoEl || !enhAudio) return;
+    pump();
+
+    /* 视频暂停时音频也要停，否则声音会跑到画面前面 */
+    if (videoEl.paused) {
+      if (!enhAudio.paused) enhAudio.pause();
+      return;
+    }
+    if (enhAudio.paused) enhAudio.play().catch(function () {});
+
+    const want = videoEl.currentTime + currentMs / 1000;
+    if (!bufferedHas(want)) return;
+    if (Math.abs(enhAudio.currentTime - want) > 0.04) {
+      try { enhAudio.currentTime = want; } catch (e) {}
+    }
+  }
+
+  function enterEnhanced() {
+    const v = pickVideo();
+    if (!v) { showToast('这个页面没有找到视频元素'); return; }
+
+    if (!hookReady) { showToast('还没有截到音频轨。确认页面用的是 MSE 播放器，并刷新一次页面。'); return; }
+
+    videoEl = v;
+    enhMS = new MediaSource();
+    /* 标记一下，inject-main 那边看到就会跳过，避免自己截自己 */
+    enhMS.__adsOwn = true;
+
+    enhAudio = document.createElement('audio');
+    enhAudio.src = URL.createObjectURL(enhMS);
+    enhAudio.style.display = 'none';
+    document.documentElement.appendChild(enhAudio);
+
+    enhMS.addEventListener('sourceopen', function () {
+      try {
+        enhBuf = enhMS.addSourceBuffer(audioMime || 'audio/mp4; codecs="mp4a.40.2"');
+        enhBuf.addEventListener('updateend', pump);
+        for (const c of chunks) appendQueue.push(c);
+        pump();
+      } catch (e) {
+        showToast('音频轨初始化失败：' + ((e && e.message) || e));
+      }
+    });
+
+    v.muted = true;
+    enhanced = true;
+    setValue(currentMs);
+    updateModeUI();
+
+    if (syncTimer) clearInterval(syncTimer);
+    syncTimer = setInterval(syncTick, 250);
+    syncTick();
+  }
+
+  function exitEnhanced() {
+    enhanced = false;
+    if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+
+    if (enhAudio) {
+      try { enhAudio.pause(); } catch (e) {}
+      try { enhAudio.removeAttribute('src'); enhAudio.load(); } catch (e) {}
+      try { enhAudio.remove(); } catch (e) {}
+    }
+    enhAudio = null;
+    enhMS = null;
+    enhBuf = null;
+    appendQueue = [];
+
+    if (videoEl) {
+      try { videoEl.muted = false; } catch (e) {}
+      videoEl = null;
+    }
+
+    if (currentMs < 0) setValue(0);
+    updateModeUI();
+  }
+
+  function updateModeUI() {
+    if (!modeTag || !modeBtn) return;
+    modeTag.textContent = enhanced ? '双向' : '延迟';
+    modeTag.classList.toggle('enh', enhanced);
+
+    if (tip) {
+      tip.textContent = enhanced
+        ? '负值让声音提前，需要缓冲里有数据'
+        : '只延后声音，不影响画面';
+    }
+
+    if (enhanced) {
+      modeBtn.hidden = true;
+    } else if (hookReady) {
+      modeBtn.hidden = false;
+      modeBtn.textContent = '启用双向';
+    } else {
+      modeBtn.hidden = false;
+      modeBtn.textContent = '双向需授权';
+    }
+  }
+
+  async function onModeClick() {
+    if (enhanced) { exitEnhanced(); return; }
+
+    if (hookReady) { enterEnhanced(); return; }
+
+    /* 还没 hook：先问 background 要站点权限，授权后刷新页面才生效 */
+    try {
+      const res = await chrome.runtime.sendMessage({
+        target: 'sw',
+        type: 'requestEnhance',
+        origin: location.origin
+      });
+      if (res && res.ok) {
+        showToast('已授权。刷新一次页面，之后就能用双向模式（可提前声音）。');
+      } else {
+        showToast((res && res.error) || '授权失败');
+      }
+    } catch (e) {
+      showToast('授权请求失败：' + ((e && e.message) || e));
+    }
+  }
+
+  /* MAIN world 送过来的消息：hook 就绪、音频轨信息、音频片段 */
+  window.addEventListener('message', function (e) {
+    const m = e.data;
+    if (!m || m.__ads !== true) return;
+
+    if (m.type === 'ready') {
+      hookReady = true;
+      updateModeUI();
+      return;
+    }
+    if (m.type === 'track') {
+      if (m.mime) audioMime = m.mime;
+      return;
+    }
+    if (m.type === 'chunk') {
+      pushChunk(m.data);
+    }
+  });
 
   /* ---------------- 消息 ---------------- */
 
@@ -542,19 +817,27 @@
   document.documentElement.appendChild(host);
 
   setValue(0);
-  tip.textContent = '悬停面板后 ←→ 微调 100ms';
+  tip.textContent = '只延后声音，不影响画面';
+  updateModeUI();
 
   /* 面板有可能比 panel-show 消息更晚就绪，主动拉一次真实状态。
-     如果那边其实已经没在接管，就不要再挂个空面板误导人。 */
+     如果那边其实已经没在接管，就不要再挂个空面板误导人。
+     例外：被注册成增强脚本注入时（DOM 上有标记），面板要留着当双向模式的入口。 */
   chrome.runtime.sendMessage({ target: 'sw', type: 'getState' })
     .then(function (st) {
       if (st && st.active) {
         api.reveal();
         setValue(st.delayMs || 0);
         if (typeof st.rms === 'number') paintMeter(st.rms);
-      } else {
-        destroy();
+        return;
       }
+      if (document.documentElement.dataset.adsHooked === '1') {
+        hookReady = true;
+        api.reveal();
+        updateModeUI();
+        return;
+      }
+      destroy();
     })
     .catch(function () {});
 })();

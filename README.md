@@ -16,6 +16,7 @@
 - **实时可调**：拖滑块立刻生效，不用刷新、不用重新加载
 - **全屏可用**：面板挂在页面里，切全屏也跟着走
 - **记住上次**：延迟值存在本地，下次接管直接沿用
+- **双向模式**：MSE 播放器上可以切换到「声音提前」，见下节
 - **无网络请求**：所有代码打包在扩展内，可离线使用，不采集任何数据
 
 ---
@@ -91,6 +92,40 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 
 ---
 
+## 双向模式（声音提前）
+
+默认链路走 `tabCapture`，抓的是播放输出，而输出里没有「未来」的样本，所以只能延后。
+
+双向模式换了一条取数路径：**复用页面自己下载的 MSE 音频片段**。页面用 `hls.js` / `dash.js` 播放时，音视频片段必须经过 `SourceBuffer.appendBuffer`，在那里截一份出来，就能拿到「比当前播放位置更靠后」的数据 —— 有了未来数据，就可以提前。
+
+```
+页面 appendBuffer ──┬─→ 页面自己的 SourceBuffer（照常播）
+                    └─→ 复制一份给扩展 → 只含音频的 MediaSource → <audio>
+```
+
+那条 `<audio>` 有自己的时钟，`currentTime` 设到画面位置之后就是「声音提前」。
+
+### 怎么启用
+
+1. 先把视频播起来
+2. 点图标接管，面板右下角会显示「双向需授权」
+3. 点它，同意该站点的访问权限，然后**刷新一次页面**
+4. 刷新后再点图标，面板上会出现「启用双向」，点一下切过去
+
+第 3 步的刷新躲不掉：`init segment`（定义音频编码参数的那段）只在播放器初始化时 append 一次，扩展必须在那之前就装好 hook。
+
+### 限制
+
+| 限制 | 说明 |
+|---|---|
+| 只对 MSE 播放器有效 | `video.src` 是 `blob:` 才行。原生 HLS（`src` 直接是 `.m3u8`）时数据在浏览器内部，JS 碰不到 |
+| 首次要授权 + 刷新 | 见上 |
+| 零额外带宽，但双倍解码 | 数据是页面已下载的，不重复请求；但解码确实跑了两遍 |
+| 能提前多少取决于缓冲 | 只能提前到「已经下载到」的位置，超出会卡住等数据 |
+| 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音 |
+
+---
+
 ## 限制
 
 | 限制 | 说明 |
@@ -109,7 +144,8 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 manifest.json     MV3 清单
 background.js     service worker：点图标接管、管理 offscreen、状态广播
 offscreen.html/js 音频处理：getUserMedia → DelayNode → destination
-content.js        页面内面板（Shadow DOM，全屏跟随）+ 错误提示
+content.js        页面内面板（Shadow DOM，全屏跟随）+ 错误提示 + 双向模式
+inject-main.js    MAIN world：劫持 appendBuffer，复制音频片段给双向模式用
 icons/            16 / 32 / 48 / 128 四档图标（make-icons.js 生成）
 tools/            图标生成、商店素材生成、打包校验、CDP 加载脚本
 store/            商店提交材料：文案、截图、隐私政策
@@ -154,7 +190,8 @@ node tools/package.js         # → dist/audio-delay-sync-<version>.zip
 跑点击行为测试（把 `chrome.*` 全 mock 掉，验证状态机）：
 
 ```bash
-node tools/test-toggle.js
+node tools/test-toggle.js    # 点图标的状态机
+node tools/test-inject.js    # appendBuffer 劫持与数据复制
 ```
 
 > 覆盖：首点接管、再点停止、换标签页先拆旧的、捕获被拒要提示且不留残留状态、页面不允许注入时退回图标角标、延迟值落盘、标签页关闭自动收尾。

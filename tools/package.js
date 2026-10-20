@@ -25,6 +25,7 @@ const INCLUDE = [
   'offscreen.html',
   'offscreen.js',
   'content.js',
+  'inject-main.js',
   'icons/icon16.png',
   'icons/icon32.png',
   'icons/icon48.png',
