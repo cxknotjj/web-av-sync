@@ -12,9 +12,10 @@
 ## 特性
 
 - **零适配**：抓的是浏览器渲染后的最终混音，不受网站 CORS、播放器实现、加密流影响
+- **一个界面**：点图标即接管，所有调节都在页面右下角那块面板里，没有第二个弹窗
 - **实时可调**：拖滑块立刻生效，不用刷新、不用重新加载
-- **全屏可用**：页面右下角有悬浮面板（Shadow DOM 隔离，跟随全屏）
-- **键盘精调**：`←` `→` 100ms，`Shift + ←/→` 1s，`Home` 归零，`Enter` 起停
+- **全屏可用**：面板挂在页面里，切全屏也跟着走
+- **记住上次**：延迟值存在本地，下次接管直接沿用
 - **无网络请求**：所有代码打包在扩展内，可离线使用，不采集任何数据
 
 ---
@@ -54,12 +55,17 @@ node tools/package.js   # 产出 dist/audio-delay-sync-<version>.zip
 
 ## 使用
 
-1. 打开视频页面，**让它开始播放**（没声音时捕获会失败）
-2. 点工具栏上的扩展图标
-3. 点**接管当前标签页**
-4. 拖滑块调节，页面右下角会出现悬浮面板——全屏也能用
+1. 打开视频页面，**让它开始播放**（没有声音时捕获会失败）
+2. **点一下工具栏上的扩展图标** —— 声音被接管，页面右下角出现面板
+3. 拖滑块调节，口型和声音对上了就停手
 
-再次点图标可以停止，或点面板上的「停止」。停止后声音自动回到页面本身。
+再点一次图标就是停止，声音立刻回到页面。面板上也有「停止」按钮。
+
+面板可以拖到任意位置，点 `−` 收起成一条，点 `×` 停止并关闭。
+
+**键盘微调**：鼠标悬停在面板上时，`←` `→` 每次 100ms，`Shift + ←/→` 每次 1 秒，`Home` 归零。只在悬停时生效，避免和播放器自己的方向键（快进快退）打架。
+
+**接管失败会弹提示**：比如标签页没有声音、或页面不允许捕获，顶部会出现一条红色说明，7 秒后自动消失。
 
 ---
 
@@ -101,10 +107,9 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 
 ```
 manifest.json     MV3 清单
-background.js     service worker：管理 offscreen、注入面板、状态广播
+background.js     service worker：点图标接管、管理 offscreen、状态广播
 offscreen.html/js 音频处理：getUserMedia → DelayNode → destination
-popup.html/js/css 工具栏面板：发起接管、调节延迟
-content.js        页面内悬浮面板（Shadow DOM，全屏跟随）
+content.js        页面内面板（Shadow DOM，全屏跟随）+ 错误提示
 icons/            16 / 32 / 48 / 128 四档图标（make-icons.js 生成）
 tools/            图标生成、商店素材生成、打包校验、CDP 加载脚本
 store/            商店提交材料：文案、截图、隐私政策
@@ -131,18 +136,28 @@ chrome.exe --remote-debugging-port=9226 \
 CDP_PORT=9226 node tools/load-unpacked.js
 ```
 
-重新生成图标：
+重新生成图标与商店素材：
 
 ```bash
-node tools/make-icons.js      # icons/icon{16,32,48,128}.png
-node tools/make-store-assets.js   # store/ 下的截图、推广图、logo
+node tools/make-icons.js                              # icons/icon{16,32,48,128}.png
+python tools/make-store-assets.py                     # store/ 下的截图、推广图、logo
 ```
+
+> 商店素材脚本用 PIL 渲染真实字体（`pip install pillow`），中文标注不用手写点阵。
 
 打商店提交包：
 
 ```bash
 node tools/package.js         # → dist/audio-delay-sync-<version>.zip
 ```
+
+跑点击行为测试（把 `chrome.*` 全 mock 掉，验证状态机）：
+
+```bash
+node tools/test-toggle.js
+```
+
+> 覆盖：首点接管、再点停止、换标签页先拆旧的、捕获被拒要提示且不留残留状态、页面不允许注入时退回图标角标、延迟值落盘、标签页关闭自动收尾。
 
 > `package.js` 会在打包前做一轮清单检查：MV3、名称/描述长度、禁用词（不得出现其他浏览器名）、四档图标齐全、`update_url` 必须不存在、以及**每一项权限都能在代码里找到调用依据**。任何一项不过直接退出。
 
@@ -169,15 +184,15 @@ node tools/package.js         # → dist/audio-delay-sync-<version>.zip
 
 ## 首次使用检查清单
 
-如果点了「接管」却听不到声音，按顺序排查：
+如果点了图标却听不到声音，按顺序排查：
 
-1. **视频在播吗** —— 没有正在播放的音频，捕获会直接失败
+1. **视频在播吗** —— 没有正在播放的音频，捕获会直接失败，顶部会弹提示
 2. **是不是浏览器内部页** —— `chrome://`、扩展商店、PDF 阅读器不允许捕获
 3. **看 service worker 控制台** —— `chrome://extensions` → 该扩展 → 检查视图 → Service Worker，红色报错就是原因
 4. **看 offscreen 是否被创建** —— 控制台里 `chrome.offscreen.hasDocument()` 应该返回 `true`
 5. **AudioContext 状态** —— 如果是 `suspended`，点一下页面再重试
 
-只要链路建起来了，页面右下角会出现悬浮面板，电平条会跟着声音跳动。**电平条不动就说明没出声**，这时不要凭页面音量条判断。
+只要链路建起来了，页面右下角会出现面板，电平条会跟着声音跳动。**电平条不动就说明没出声**，这时不要凭页面音量条判断。
 
 ---
 
@@ -192,7 +207,7 @@ node tools/package.js         # → dist/audio-delay-sync-<version>.zip
 
 **面板没出现**
 
-某些页面不允许注入（`chrome://`、扩展商店、部分 PDF 阅读器）。这不影响音频，只是少了调节入口，用 popup 调也一样。
+某些页面不允许注入（`chrome://`、扩展商店、部分 PDF 阅读器）。这类页面上音频本来也捕获不了，工具栏图标会短暂显示红色 `!` 角标提示失败。
 
 **声音有咔哒声**
 

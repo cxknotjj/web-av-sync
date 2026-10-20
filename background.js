@@ -9,6 +9,7 @@
 
 const OFFSCREEN_URL = 'offscreen.html';
 const CONTENT_SCRIPT = 'content.js';
+const LAST_DELAY_KEY = 'lastDelayMs';
 
 let creatingOffscreen = null;
 let currentTabId = null;
@@ -20,6 +21,30 @@ let stateReady = (async () => {
     if (typeof r.currentTabId === 'number') currentTabId = r.currentTabId;
   } catch (e) { /* session storage 不可用时忽略 */ }
 })();
+
+/* 延迟值要跨会话记住：没有 popup 之后，接管时直接沿用上次调好的数，
+   否则每次都得从 0 重新拖。 */
+let lastDelayMs = 0;
+let prefReady = (async () => {
+  try {
+    const r = await chrome.storage.local.get(LAST_DELAY_KEY);
+    if (typeof r[LAST_DELAY_KEY] === 'number') lastDelayMs = clampDelay(r[LAST_DELAY_KEY]);
+  } catch (e) {}
+})();
+
+function clampDelay(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return 0;
+  return Math.min(10000, Math.max(0, Math.round(n)));
+}
+
+async function saveDelay(ms) {
+  lastDelayMs = clampDelay(ms);
+  try {
+    await chrome.storage.local.set({ [LAST_DELAY_KEY]: lastDelayMs });
+  } catch (e) {}
+}
+
 
 async function setTab(tabId) {
   currentTabId = tabId;
@@ -107,12 +132,14 @@ async function start(tabId, streamId, delayMs) {
       return { ok: false, error: (res && res.error) || '音频链路启动失败' };
     }
 
-    /* 注入悬浮面板。失败不影响音频，只是少了个调节入口 */
+    /* 注入悬浮面板。失败不影响音频，但现在没有 popup 了，
+       面板进不去就等于用户完全没法调延迟，必须让他知道。 */
     try {
       await chrome.scripting.executeScript({ target: { tabId: tabId }, files: [CONTENT_SCRIPT] });
       await sendToTab(tabId, { type: 'panel-show', delayMs: delayMs, rms: res.rms || 0 });
     } catch (e) {
-      /* chrome:// 、扩展商店等页面不允许注入，忽略 */
+      /* chrome:// 、扩展商店等页面不允许注入 */
+      flashBadge(tabId);
     }
 
     return { ok: true, delayMs: res.delayMs, rms: res.rms };
@@ -129,8 +156,6 @@ async function stop() {
   await stopAudio();
   await setTab(null);
 
-  /* 通知所有界面回到未接管状态 */
-  chrome.runtime.sendMessage({ target: 'ui', type: 'stopped' }).catch(function () {});
   if (tabId != null) {
     chrome.tabs.sendMessage(tabId, { target: 'content', type: 'stopped' })
       .catch(function () {});
@@ -147,7 +172,9 @@ async function setDelay(delayMs) {
   await stateReady;
   if (!(await hasOffscreen())) return { ok: false, error: '尚未接管' };
   try {
-    return await toOffscreen('audio-setDelay', { delayMs: delayMs });
+    const res = await toOffscreen('audio-setDelay', { delayMs: delayMs });
+    if (res && res.ok) saveDelay(res.delayMs != null ? res.delayMs : delayMs);
+    return res;
   } catch (e) {
     return { ok: false, error: readableError(e) };
   }
@@ -166,6 +193,73 @@ async function getState() {
   }
 }
 
+/* ---------------- 点图标：接管的唯一入口 ----------------
+ *
+ * 为什么放在 service worker：content script 里既拿不到 chrome.tabCapture，
+ * 点按钮也不算用户手势，授不出 activeTab。而 action.onClicked 是浏览器
+ * 亲自派发的用户手势，在这里调 getMediaStreamId 才是合法的。
+ */
+
+async function toggle(tab) {
+  if (!tab || typeof tab.id !== 'number') return;
+  const tabId = tab.id;
+
+  await stateReady;
+  await prefReady;
+
+  /* 同一个标签页再点一次 = 停止 */
+  if (currentTabId === tabId && (await hasOffscreen())) {
+    await stop();
+    return;
+  }
+
+  /* 接管着别的标签页就先拆掉，避免两个 AudioContext 抢同一路输出 */
+  if (currentTabId != null && currentTabId !== tabId) {
+    await stop();
+  }
+
+  let streamId;
+  try {
+    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+  } catch (e) {
+    await notifyError(tabId, readableError(e));
+    return;
+  }
+
+  const res = await start(tabId, streamId, lastDelayMs);
+  if (!res.ok) await notifyError(tabId, res.error);
+}
+
+/**
+ * 出错时把面板注入进去显示原因。
+ * 注入可能失败（chrome:// 之类），那就只能靠图标角标兜底。
+ */
+async function notifyError(tabId, text) {
+  let injected = false;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: [CONTENT_SCRIPT] });
+    injected = true;
+  } catch (e) {}
+
+  if (injected) {
+    await sendToTab(tabId, { type: 'panel-error', text: text });
+    return;
+  }
+
+  flashBadge(tabId);
+}
+
+/** 页面上什么都说不了的时候，用角标提示 4 秒 */
+async function flashBadge(tabId) {
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color: '#f85149' });
+    await chrome.action.setBadgeText({ tabId: tabId, text: '!' });
+    setTimeout(function () {
+      chrome.action.setBadgeText({ tabId: tabId, text: '' }).catch(function () {});
+    }, 4000);
+  } catch (e) {}
+}
+
 /* ---------------- 消息路由 ---------------- */
 
 function sendToTab(tabId, msg) {
@@ -175,9 +269,12 @@ function sendToTab(tabId, msg) {
 }
 
 function broadcast(msg) {
-  chrome.runtime.sendMessage(Object.assign({ target: 'ui' }, msg)).catch(function () {});
   sendToTab(currentTabId, msg);
 }
+
+chrome.action.onClicked.addListener(function (tab) {
+  toggle(tab).catch(function () {});
+});
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg) return false;
@@ -250,11 +347,11 @@ function readableError(e) {
   const text = String((e && e.message) || e || '未知错误');
 
   if (name === 'NotAllowedError' || /Permission denied|not allowed/i.test(text)) {
-    return '浏览器拒绝了这个标签页的音频捕获。请直接点击工具栏上的扩展图标再试一次。'
-      + '（某些界面，例如扩展管理页、新标签页，不允许捕获。）';
+    return '浏览器拒绝捕获这个标签页的音频。确认页面正在出声，'
+      + '并避开扩展管理页、新标签页这类不允许捕获的界面。';
   }
   if (name === 'NotFoundError' || /no audio|Requested device not found/i.test(text)) {
-    return '这个标签页当前没有可捕获的音频。先让视频开始播放，再点接管。';
+    return '这个标签页当前没有可捕获的音频。先让视频开始播放，再点图标。';
   }
   if (name === 'InvalidStateError') {
     return '这个标签页已经被别的程序捕获了，同一时刻只能有一路。';

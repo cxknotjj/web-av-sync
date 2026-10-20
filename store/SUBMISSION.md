@@ -73,20 +73,20 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 ## 怎么用
 
 1. 打开视频页面，**先让视频播放起来**（没有声音时无法捕获）
-2. 点浏览器工具栏上的扩展图标
-3. 点「接管当前标签页」
-4. 拖动滑块，直到口型和声音对上
+2. 点一下浏览器工具栏上的扩展图标——声音立刻被接管，页面右下角出现面板
+3. 拖动滑块，直到口型和声音对上
 
-再点一次图标即可停止，声音立即回到页面本身。页面右下角也会出现一个悬浮面板，全屏播放时同样可用。
+再点一次图标就是停止，声音立刻回到页面本身。面板上也有「停止」按钮。
 
 ## 快捷键
 
-面板和弹窗都支持键盘精调：
+鼠标悬停在面板上时：
 
 - `←` / `→` — 减 / 加 100 毫秒
 - `Shift + ←` / `Shift + →` — 减 / 加 1 秒
 - `Home` — 归零
-- `Enter` — 开始 / 停止
+
+只在悬停时生效，不会和播放器自己的方向键（快进快退）打架。
 
 ## 几点必须提前说清楚的限制
 
@@ -131,11 +131,14 @@ That means:
 ## How to use
 
 1. Open a video page and **let it start playing** (capture fails on silence)
-2. Click the extension icon in the toolbar
-3. Click "接管当前标签页" (Take over this tab)
-4. Drag the slider until lip sync matches
+2. Click the extension icon in the toolbar once — audio is taken over and a panel appears in the bottom-right corner
+3. Drag the slider until lip sync matches
 
-Click the icon again to stop; audio returns to the page instantly. A floating panel also appears in the bottom-right corner of the page, which keeps working in fullscreen.
+Click the icon again to stop; audio returns to the page instantly. The panel also has a stop button, and it keeps working in fullscreen.
+
+## Keyboard
+
+While hovering over the panel: `←` / `→` for 100 ms, `Shift + ←/→` for 1 s, `Home` to reset. Only active on hover, so it never fights the player's own arrow-key seeking.
 
 ## Known limitations
 
@@ -154,12 +157,12 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 
 | 文件 | 尺寸 | 用途 |
 |---|---|---|
-| `store/screenshot-1-scene.png` | 1280×800 | 使用场景：播放器 + 弹窗 + 悬浮面板同时出现 |
-| `store/screenshot-2-delay.png` | 1280×800 | 三档延迟对比（0 / 2.4s / 8.0s） |
+| `store/screenshot-1-scene.png` | 1280×800 | 使用场景：播放器 + 右下角面板 |
+| `store/screenshot-2-panel.png` | 1280×800 | 面板特写 + 各控件标注 |
 
 > 商店要求至少 1 张，最多 6 张，推荐 1280×800 或 640×400。
 > 政策 1.1.2：截图必须「清晰、信息量大、渲染正确，不得拉伸或模糊」。
-> **这两张是按 popup 真实配色与布局重绘的示意图**（`tools/make-store-assets.js` 生成），不是真实抓屏。文案与 UI 一致，功能一致，符合要求。如果希望更真实，可以补一张真机截图作为第三张。
+> **这两张是按 content.js 真实配色与布局重绘的示意图**（`tools/make-store-assets.py` 生成），不是真实抓屏。文案与 UI 一致，功能一致，符合要求。如果希望更真实，可以补一张真机截图作为第三张。
 
 ### Promotional images（推广图）
 
@@ -191,7 +194,7 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 **tabCapture**
 
 ```
-Core functionality. getMediaStreamId() is the only API that can capture a tab's audio output. Without this permission the extension cannot perform its single stated purpose. It is only invoked after the user clicks the extension icon and then clicks the "take over this tab" button — two explicit user actions, no automatic capture.
+Core functionality. getMediaStreamId() is the only API that can capture a tab's audio output. Without this permission the extension cannot perform its single stated purpose. It is invoked only from the toolbar icon click handler (chrome.action.onClicked), which is a user gesture — capture never starts on its own.
 ```
 
 **offscreen**
@@ -203,7 +206,7 @@ MV3 service workers cannot instantiate Web Audio (AudioContext is unavailable in
 **storage**
 
 ```
-Persists two values in chrome.storage.local: the last delay value the user selected (integer milliseconds, 0–10000). Used only to restore the slider position the next time the popup is opened. No user identifiers, no telemetry, nothing leaves the device.
+Persists one value in chrome.storage.local: the last delay value the user selected (integer milliseconds, 0–10000). Used only to restore the slider position the next time capture starts. No user identifiers, no telemetry, nothing leaves the device.
 ```
 
 **activeTab**
@@ -215,7 +218,7 @@ Grants temporary host access to the current tab only at the moment the user clic
 **scripting**
 
 ```
-Injects a single content script (a small floating panel with an <input type="range">) into the tab the user already granted via activeTab, so the delay can be adjusted while in fullscreen video. Injection failure is caught and ignored — it never affects the audio pipeline. No page data is read.
+Injects a single content script into the tab the user already granted via activeTab: a floating panel with an <input type="range"> so the delay can be adjusted during fullscreen video, plus a small banner that explains capture failures (for example "this tab is not playing audio"). Injection failure is caught and ignored — the toolbar icon shows a red badge instead, and the audio pipeline is never affected. No page data is read.
 ```
 
 ### Remote code（是否使用远程代码）
@@ -264,31 +267,39 @@ Chromium's activeTab design, that call only succeeds if the extension was invoke
 by a real user gesture on that specific tab. It also requires the tab to have an
 active audio stream, otherwise capture returns NotAllowedError.
 
+There is no popup. Clicking the toolbar icon IS the action — no dialog opens,
+the capture starts immediately.
+
 TEST STEPS (please follow in order):
 
 1. Open https://www.youtube.com/watch?v=aqz-KE-bpKQ  (Big Buck Bunny, public domain,
    no login required) — or any page that plays audio.
 2. Click PLAY. Confirm you can hear sound through your speakers/headphones.
    >>> Do not skip this. With a paused tab, capture is expected to fail. <<<
-3. While the video is still playing, click the extension's toolbar icon.
-4. Click the blue button "接管当前标签页" (Take over this tab).
-5. Expected result within ~1 second:
-   - The button turns into a red-bordered "停止接管" (Stop)
-   - The status chip changes to "已接管" (Taken over)
-   - A green level meter under the button starts moving with the sound
-   - A small floating panel appears in the bottom-right corner of the page
-6. Drag the slider right. Expected: you hear the audio shift later by the shown
-   amount. The video itself keeps playing normally; its own progress bar and
-   quality menu are unaffected.
-7. Click the red button to stop. Expected: audio returns to the page immediately.
+3. While the video is still playing, click the extension's toolbar icon ONCE.
+4. Expected result within ~1 second:
+   - A floating panel appears in the bottom-right corner of the page
+   - The panel shows a cyan number (seconds) and a slider
+   - A green level meter inside the panel starts moving with the sound
+5. Drag the slider to the right. Expected: you hear the audio shift later by the
+   amount shown. The video itself keeps playing normally; its own progress bar,
+   quality menu and subtitles are unaffected.
+6. Click the toolbar icon again, or the red "停止" (Stop) button on the panel.
+   Expected: audio returns to the page immediately.
+
+IF NOTHING HAPPENS:
+
+- A red banner appears at the top of the page explaining the failure. The most
+  common cause is a tab that is not currently playing audio.
+- On pages where script injection is blocked (chrome:// pages, the extension
+  store, PDF viewer), the toolbar icon briefly shows a red "!" badge instead.
+  Capture is blocked by Chromium on those pages anyway.
 
 NOTES FOR THE REVIEWER:
 
 - While captured, the page's own volume control appears normal but is silent.
   This is browser-enforced tab muting during tabCapture, not a defect. Audio is
   coming out through the extension's audio graph instead.
-- The extension intentionally cannot work on chrome:// pages, the extension store,
-  or the PDF viewer — Chromium blocks capture there.
 - No login, no account, no payment, no network access is required or performed.
 - There is exactly one purpose and one control surface: a delay slider.
 ```

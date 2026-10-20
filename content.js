@@ -19,6 +19,96 @@
   const HOST_ID = 'audio-delay-sync-panel';
   const MAX_MS = 10000;
 
+  /* ---------------- 错误提示 ----------------
+   * 与主面板完全独立：接管失败时主面板会因 getState 返回 inactive 而自我
+   * 销毁，提示必须活下来，否则用户点了图标什么都没发生，完全无从排查。
+   */
+
+  let toastEl = null;
+  let toastTimer = null;
+
+  function hideToast() {
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    if (toastEl) {
+      try { toastEl.remove(); } catch (e) {}
+      toastEl = null;
+    }
+  }
+
+  function showToast(text) {
+    hideToast();
+
+    /* 上一次注入留下的提示可能还在页面上，先清掉再建 */
+    const stale = document.getElementById('audio-delay-sync-toast');
+    if (stale) { try { stale.remove(); } catch (e) {} }
+
+    const wrap = document.createElement('div');
+    wrap.id = 'audio-delay-sync-toast';
+    const sh = wrap.attachShadow({ mode: 'open' });
+    sh.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+          position: fixed;
+          top: 20px;
+          left: 50%;
+          transform: translateX(-50%);
+          z-index: 2147483647;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        }
+        .toast {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          max-width: 460px;
+          padding: 11px 12px 11px 14px;
+          border-radius: 9px;
+          background: rgba(20, 14, 14, .96);
+          border: 1px solid rgba(248, 81, 73, .45);
+          box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
+          color: #e6edf3;
+          font-size: 12.5px;
+          line-height: 1.55;
+        }
+        .bar {
+          width: 2px;
+          align-self: stretch;
+          border-radius: 1px;
+          background: #f85149;
+          flex: none;
+        }
+        .txt { flex: 1; user-select: text; }
+        .x {
+          flex: none;
+          width: 18px;
+          height: 18px;
+          padding: 0;
+          border: 0;
+          border-radius: 4px;
+          background: transparent;
+          color: #8b949e;
+          font-size: 14px;
+          line-height: 1;
+          cursor: pointer;
+          font-family: inherit;
+        }
+        .x:hover { background: rgba(255, 255, 255, .1); color: #e6edf3; }
+      </style>
+      <div class="toast">
+        <span class="bar"></span>
+        <span class="txt"></span>
+        <button class="x" type="button" title="关闭">×</button>
+      </div>
+    `;
+
+    sh.querySelector('.txt').textContent = text;
+    sh.querySelector('.x').addEventListener('click', hideToast);
+    document.documentElement.appendChild(wrap);
+    toastEl = wrap;
+
+    toastTimer = setTimeout(hideToast, 7000);
+  }
+
   let currentMs = 0;
   let collapsed = false;
   let dragging = false;
@@ -27,6 +117,9 @@
 
   const host = document.createElement('div');
   host.id = HOST_ID;
+  /* 先藏着，等确认真的在接管再显形。
+     否则接管失败时面板会闪一下再消失，看着像 bug。 */
+  host.style.display = 'none';
 
   const shadow = host.attachShadow({ mode: 'open' });
   shadow.innerHTML = `
@@ -239,7 +332,7 @@
         </div>
         <div class="meter"><div class="bar" data-el="bar"></div></div>
         <div class="foot">
-          <span class="tip" data-el="tip">只延后声音，不影响画面</span>
+          <span class="tip" data-el="tip">悬停面板后 ←→ 微调 100ms</span>
           <button class="stop" data-act="stop">停止</button>
         </div>
       </div>
@@ -326,6 +419,36 @@
     }
   });
 
+  /* ---------------- 键盘 ----------------
+   * 只在鼠标悬停于面板时响应：页面播放器自己就拿方向键快进快退，
+   * 全局监听会跟它打架，用户按一下两边都动。
+   */
+
+  let hovering = false;
+  host.addEventListener('pointerenter', function () { hovering = true; });
+  host.addEventListener('pointerleave', function () { hovering = false; });
+
+  document.addEventListener('keydown', function (e) {
+    if (!hovering) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|TEXTAREA|SELECT)$/i.test(tag)) return;
+
+    const step = e.shiftKey ? 1000 : 100;
+    let next = null;
+
+    if (e.key === 'ArrowLeft') next = currentMs - step;
+    else if (e.key === 'ArrowRight') next = currentMs + step;
+    else if (e.key === 'Home') next = 0;
+    else return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    setValue(next);
+    queueDelay(currentMs);
+  }, true);
+
   /* 拖动：按住头部移动整个面板 */
   head.addEventListener('pointerdown', function (e) {
     if (e.target.getAttribute && e.target.getAttribute('data-act')) return;
@@ -374,6 +497,7 @@
 
   const api = {
     reveal: function () {
+      host.style.display = '';
       if (collapsed) {
         collapsed = false;
         panel.classList.remove('collapsed');
@@ -382,7 +506,8 @@
     },
     setDelay: setValue,
     setMeter: paintMeter,
-    destroy: destroy
+    destroy: destroy,
+    toast: showToast
   };
   window.__adsPanel = api;
 
@@ -403,6 +528,11 @@
       return;
     }
 
+    if (msg.type === 'panel-error') {
+      showToast(msg.text || '接管失败，原因未知');
+      return;
+    }
+
     if (msg.type === 'stopped') {
       destroy();
     }
@@ -412,13 +542,14 @@
   document.documentElement.appendChild(host);
 
   setValue(0);
-  tip.textContent = '只延后声音，不影响画面';
+  tip.textContent = '悬停面板后 ←→ 微调 100ms';
 
   /* 面板有可能比 panel-show 消息更晚就绪，主动拉一次真实状态。
      如果那边其实已经没在接管，就不要再挂个空面板误导人。 */
   chrome.runtime.sendMessage({ target: 'sw', type: 'getState' })
     .then(function (st) {
       if (st && st.active) {
+        api.reveal();
         setValue(st.delayMs || 0);
         if (typeof st.rms === 'number') paintMeter(st.rms);
       } else {

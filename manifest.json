@@ -15,8 +15,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "音画偏移",
+    "default_title": "音画偏移 · 点一下接管当前标签页",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
