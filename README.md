@@ -197,3 +197,11 @@ node tools/package.js         # → dist/audio-delay-sync-<version>.zip
 **声音有咔哒声**
 
 拖动滑块时 `delayTime` 在 60ms 内线性过渡。如果特别频繁地大幅拖动，偶尔会有轻微跳音——这是 `DelayNode` 的固有特性，无法完全消除。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © 2026 cxknotjj
+
+随便用、改、商用、闭源分发都行，保留版权声明即可。

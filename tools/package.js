@@ -16,7 +16,9 @@ const zlib = require('zlib');
 const ROOT = path.join(__dirname, '..');
 const DIST = path.join(ROOT, 'dist');
 
-/* 进包的东西：只有运行时文件 */
+/* 进包的东西：只有运行时文件。
+   LICENSE 也放进去：MIT 要求在分发的副本中保留版权声明，
+   商店 zip 就是一份副本。多这一个纯文本文件不影响审核。 */
 const INCLUDE = [
   'manifest.json',
   'background.js',
@@ -29,7 +31,8 @@ const INCLUDE = [
   'icons/icon16.png',
   'icons/icon32.png',
   'icons/icon48.png',
-  'icons/icon128.png'
+  'icons/icon128.png',
+  'LICENSE'
 ];
 
 /* ---------------- zip ---------------- */
