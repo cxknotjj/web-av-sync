@@ -37,12 +37,17 @@
     }
   }
 
-  function showToast(text) {
+  function showToast(text, kind) {
     hideToast();
 
     /* 上一次注入留下的提示可能还在页面上，先清掉再建 */
     const stale = document.getElementById('audio-delay-sync-toast');
     if (stale) { try { stale.remove(); } catch (e) {} }
+
+    const ok = kind === 'ok';
+    const accent = ok ? '#3fb950' : '#f85149';
+    const bg = ok ? 'rgba(10, 18, 13, .96)' : 'rgba(20, 14, 14, .96)';
+    const edge = ok ? 'rgba(63, 185, 80, .45)' : 'rgba(248, 81, 73, .45)';
 
     const wrap = document.createElement('div');
     wrap.id = 'audio-delay-sync-toast';
@@ -65,8 +70,8 @@
           max-width: 460px;
           padding: 11px 12px 11px 14px;
           border-radius: 9px;
-          background: rgba(20, 14, 14, .96);
-          border: 1px solid rgba(248, 81, 73, .45);
+          background: ${bg};
+          border: 1px solid ${edge};
           box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
           color: #e6edf3;
           font-size: 12.5px;
@@ -76,7 +81,7 @@
           width: 2px;
           align-self: stretch;
           border-radius: 1px;
-          background: #f85149;
+          background: ${accent};
           flex: none;
         }
         .txt { flex: 1; user-select: text; }
@@ -888,8 +893,9 @@
         origin: location.origin
       });
       if (res && res.ok) {
-        showToast('已授权。刷新一次页面，之后就能用双向模式（可提前声音）。');
+        showToast('已授权。刷新一次页面，之后就能用双向模式（可提前声音）。', 'ok');
       } else {
+        /* needGesture 时 error 里已经写清下一步该点哪里，直接展示 */
         showToast((res && res.error) || '授权失败');
       }
     } catch (e) {
@@ -939,6 +945,11 @@
 
     if (msg.type === 'meter') {
       paintMeter(msg.rms);
+      return;
+    }
+
+    if (msg.type === 'panel-notice') {
+      showToast(msg.text || '', msg.kind);
       return;
     }
 

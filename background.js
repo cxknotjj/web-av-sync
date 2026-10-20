@@ -207,6 +207,13 @@ async function toggle(tab) {
   await stateReady;
   await prefReady;
 
+  /* 这次点图标是来完成「双向模式」授权的，不接管 */
+  const pending = await peekPendingEnhance();
+  if (pending && pending.tabId === tabId) {
+    await completeEnhance(tabId, pending.origin);
+    return;
+  }
+
   /* 同一个标签页再点一次 = 停止 */
   if (currentTabId === tabId && (await hasOffscreen())) {
     await stop();
@@ -319,27 +326,124 @@ async function rebuildEnhanced() {
   await registerEnhanced(origins);
 }
 
-/**
- * 请求当前站点权限并注册注入脚本。
- * 必须在用户手势里触发 —— 从面板按钮过来可能已经丢了手势，
- * 所以失败时给一句能操作的提示，让用户去扩展页手动授权。
+/* ---------------- 双向模式授权 ----------------
+ * chrome.permissions.request 要求调用发生在「用户手势」里。content script
+ * 的点击经 sendMessage 到 SW 时，手势在跨进程那一步就丢了（实测报
+ * "This function must be called during a user gesture"）。
+ *
+ * 唯一可靠的手势来源是 action.onClicked —— 浏览器亲自派发。
+ * 所以面板按钮只登记意图，真正的请求放到下一次点图标时执行。
  */
-async function requestEnhance(origin) {
+
+const PENDING_KEY = 'pendingEnhance';
+const PENDING_TTL = 5 * 60 * 1000;
+
+async function setPendingEnhance(tabId, origin) {
+  try {
+    await chrome.storage.session.set({
+      [PENDING_KEY]: { tabId: tabId, origin: origin, at: Date.now() }
+    });
+  } catch (e) {}
+}
+
+async function peekPendingEnhance() {
+  try {
+    const r = await chrome.storage.session.get(PENDING_KEY);
+    const p = r && r[PENDING_KEY];
+    if (!p || typeof p.tabId !== 'number') return null;
+    if (Date.now() - (p.at || 0) > PENDING_TTL) {
+      await chrome.storage.session.remove(PENDING_KEY);
+      return null;
+    }
+    return p;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function clearPendingEnhance() {
+  try { await chrome.storage.session.remove(PENDING_KEY); } catch (e) {}
+}
+
+/** 图标上打个标记，明确告诉用户「下一步点这里」 */
+async function markNeedGesture(tabId) {
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color: '#22d3ee', tabId: tabId });
+    await chrome.action.setBadgeText({ tabId: tabId, text: '↑' });
+    await chrome.action.setTitle({ tabId: tabId, title: '点一下图标，完成双向模式授权' });
+  } catch (e) {}
+}
+
+async function clearNeedGesture(tabId) {
+  try {
+    await chrome.action.setBadgeText({ tabId: tabId, text: '' });
+    await chrome.action.setTitle({ tabId: tabId, title: '音画偏移 · 点一下接管当前标签页' });
+  } catch (e) {}
+}
+
+/**
+ * 面板按钮点进来。没权限就只登记，等下一次点图标。
+ */
+async function requestEnhance(origin, tabId) {
   if (!origin || !/^https?:/i.test(origin)) {
     return { ok: false, error: '这个页面不支持（只对 http / https 站点生效）' };
   }
 
   try {
-    if (!(await hasOriginPermission(origin))) {
-      const granted = await chrome.permissions.request({ origins: [origin + '/*'] });
-      if (!granted) {
-        return { ok: false, error: '没有拿到站点权限。可以在扩展管理页的「网站访问权限」里手动设为允许。' };
-      }
+    /* 可能之前在别的标签页已经授权过同一个站点。
+       这里直接按 origin 注册，不依赖 getAll() 的结果 —— 后者拿不全就白跑。 */
+    if (await hasOriginPermission(origin)) {
+      await registerEnhanced([origin]);
+      return { ok: true, needsReload: true };
     }
-    await rebuildEnhanced();
-    return { ok: true, needsReload: true };
+
+    if (typeof tabId !== 'number') {
+      return { ok: false, error: '找不到当前标签页，刷新页面后重试。' };
+    }
+
+    await setPendingEnhance(tabId, origin);
+    await markNeedGesture(tabId);
+
+    return {
+      ok: false,
+      needGesture: true,
+      error: '浏览器规定网站权限必须由你亲自点图标才能申请。点一下工具栏上的扩展图标，会弹出授权框——这一步只做授权，不会开始接管。'
+    };
   } catch (e) {
     return { ok: false, error: '授权失败：' + ((e && e.message) || String(e)) };
+  }
+}
+
+/** 由点图标触发的真正授权。这里手势是有效的。 */
+async function completeEnhance(tabId, origin) {
+  try {
+    const granted = await chrome.permissions.request({ origins: [origin + '/*'] });
+    await clearNeedGesture(tabId);
+
+    if (!granted) {
+      await sendToTab(tabId, {
+        type: 'panel-notice',
+        kind: 'error',
+        text: '没有授权，双向模式仍然不可用。需要时可以再点一次面板上的按钮。'
+      });
+      return;
+    }
+
+    await clearPendingEnhance();
+    await rebuildEnhanced();
+
+    await sendToTab(tabId, {
+      type: 'panel-notice',
+      kind: 'ok',
+      text: '已授权当前站点。刷新一次页面，面板上就会出现「启用双向」。'
+    });
+  } catch (e) {
+    await clearNeedGesture(tabId);
+    await sendToTab(tabId, {
+      type: 'panel-notice',
+      kind: 'error',
+      text: '授权失败：' + ((e && e.message) || String(e))
+    });
   }
 }
 
@@ -393,7 +497,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       getState().then(sendResponse);
       return true;
     case 'requestEnhance':
-      requestEnhance(msg.origin).then(sendResponse);
+      requestEnhance(msg.origin, sender && sender.tab && sender.tab.id).then(sendResponse);
       return true;
     default:
       return false;
