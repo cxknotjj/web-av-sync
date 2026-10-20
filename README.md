@@ -468,3 +468,15 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 [MIT](LICENSE) © 2026 cxknotjj
 
 随便用、改、商用、闭源分发都行，保留版权声明即可。
+
+### 第三方组件
+
+`mux.min.js` 是 [mux.js](https://github.com/videojs/mux.js) 7.0.3，**Apache-2.0**，
+版权归 Brightcove, Inc.，原样分发、未做修改。只用于链路②把 ts 切片解复用成 fMP4。
+
+按 Apache-2.0 的要求，许可全文和版权声明随包分发：
+
+- [`LICENSE-APACHE-2.0.txt`](LICENSE-APACHE-2.0.txt) —— 许可全文
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) —— 版本、来源、用途、升级步骤
+
+这两个文件都会打进 `dist/` 的发布包，不只是放在仓库里。

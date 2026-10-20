@@ -92,7 +92,7 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 
 ## 几点必须提前说清楚的限制
 
-- **默认模式只能延后。** 实时音频流里没有"未来"的样本，物理上做不到让声音提前。要提前需要切到可选的「双向模式」，它按页面播放方式走两条链路：MSE 播放器（`video.src` 是 `blob:`）复用页面已下载的音频片段，零额外带宽，首次需要按站点授权；直连媒体（`.m3u8` / `.mp4`）由浏览器对同一路流再解码一遍，不需要任何权限，但流量和解码翻倍。实时媒体流（MediaStream，如 WebRTC）两种链路都不适用，面板会如实写明。
+- **默认模式只能延后。** 实时音频流里没有"未来"的样本，物理上做不到让声音提前。要提前需要切到可选的「双向模式」，它会按页面播放方式自动挑一条代价最低的链路：① MSE 播放器（`video.src` 是 `blob:`）复用页面已下载的音频片段，零额外带宽，首次需要按站点授权；② 原生 HLS（`video.src` 是 `.m3u8`）通过浏览器的调试协议取回播放器已经下过的切片，同样零额外带宽，代价是页面顶部会出现一条「正在调试此浏览器」的提示条——那是浏览器强制显示的，扩展无法隐藏；③ 前两条都拿不到时退到"再拉一路"，由浏览器对同一路流重新解码一遍，不需要任何权限，但流量约翻倍。**面板上会实时显示当前走的是哪一条、还要不要等、最多能提前多少秒。** 实时媒体流（MediaStream，如 WebRTC）三条都不适用，面板会如实写明。
 - **捕获的是整个标签页。** 页面里的广告声、提示音会一起被延迟。只挑视频音轨做不到——那需要接管播放器本身。
 - **接管期间，页面自己的音量条看起来正常但没有声音。** 这是浏览器的强制行为（捕获后标签页静音），不是 bug。声音从扩展这条链路出来。
 - **一次只能接管一个标签页。**
@@ -146,7 +146,7 @@ While hovering over the panel: `←` / `→` for 100 ms, `Shift + ←/→` for 1
 
 ## Known limitations
 
-- **Delay only in the default mode.** Tab audio is captured after mixing, so there are no future samples to pull forward — advancing audio in real time is impossible on that path. On pages that use Media Source Extensions, the optional bidirectional mode reuses the audio segments the page already downloaded and can therefore advance it. It is unavailable on native HLS (where `video.src` is an `.m3u8` URL and the browser demuxes internally), and the panel says so instead of pretending otherwise.
+- **Delay only in the default mode.** Tab audio is captured after mixing, so there are no future samples to pull forward — advancing audio in real time is impossible on that path. The optional bidirectional mode picks the cheapest route available for the page: ① MSE players (`video.src` is `blob:`) reuse the audio segments the page already downloaded — no extra bandwidth, one per-site permission grant. ② Native HLS (`video.src` is an `.m3u8` URL) reads back the segments the player already downloaded through the browser's debugging protocol — also no extra bandwidth, but Chromium shows its own "started debugging this browser" infobar while the mode is active, and the extension cannot hide it. ③ Fallback: decode the same stream a second time into a separate audio element — no permissions needed, but roughly double the bandwidth. **The panel shows at all times which route is in use, whether it is still loading, and how many seconds of audio are buffered ahead.** Real-time MediaStream sources (WebRTC) are not supported by any route, and the panel says so instead of pretending otherwise.
 - **The whole tab is captured.** Ads and notification sounds on the page get delayed too.
 - **The page's own volume slider looks normal but is silent while captured.** This is browser-enforced behavior, not a bug.
 - **One tab at a time.**
@@ -227,6 +227,38 @@ Grants temporary host access to the current tab only at the moment the user clic
 Injects a single content script into the tab the user already granted via activeTab: a floating panel with an <input type="range"> so the delay can be adjusted during fullscreen video, plus a small banner that explains capture failures (for example "this tab is not playing audio"). Injection failure is caught and ignored — the toolbar icon shows a red badge instead, and the audio pipeline is never affected. No page data is read.
 ```
 
+**debugger**
+
+```
+OPTIONAL — used only when the user enables the optional bidirectional mode on a page
+that plays native HLS.
+
+Purpose: read audio data the page's own player has already downloaded. When
+video.src is an .m3u8 URL, Chrome's built-in demuxer consumes the .ts segments
+internally and those bytes never pass through JavaScript: there is no MediaSource, no
+SourceBuffer.appendBuffer, and Manifest V3's webRequest cannot return response bodies.
+The DevTools protocol is the only channel that can read them, and chrome.debugger is
+that channel.
+
+Scope: after attaching, the extension enables ONLY the Network domain, and calls
+Network.getResponseBody only for requests whose URL ends in .ts or .m4s. Everything
+else is ignored. It does not call Runtime.evaluate, does not evaluate or inject
+scripts, does not read cookies, storage, form fields or any other page data, and it
+never issues a network request of its own.
+
+Lifetime: attached inside the click handler of the "enable bidirectional" button,
+detached when the user leaves the mode, closes the panel, or navigates the tab away.
+If attaching fails (for example the user already has DevTools open, or another
+extension holds the debugger) the extension falls back to a different implementation
+and the feature keeps working, so this permission is never load-bearing for the core
+delay mode.
+
+User-visible: Chromium shows its own "started debugging this browser" infobar for as
+long as the session is attached. The extension cannot hide it and does not try to —
+the panel states this up front before the user clicks. The default delay mode does not
+use this permission at all.
+```
+
 **optional_host_permissions (`*://*/*`)**
 
 ```
@@ -247,6 +279,29 @@ No page content is read, no request is made, nothing is transmitted. The copied 
 
 ```
 All code is bundled in the package. The extension makes zero network requests — no CDN, no fonts, no analytics, no remote scripts. It works fully offline.
+```
+
+### Third-party libraries（第三方库）
+
+表单问「是否包含第三方库」时选 **是**，并填：
+
+| 名称 | 版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| mux.js | 7.0.3 | Apache-2.0 | 把 MPEG-TS 切片解复用成 fMP4，供双向模式播放 |
+
+- 版权：`Copyright Brightcove, Inc.`
+- 源码：<https://github.com/videojs/mux.js>
+- 随包文件：`mux.min.js`，**未修改**，首行 banner 的 `@license Apache-2.0` 保留
+- 合规文件：`LICENSE-APACHE-2.0.txt`（许可全文）和 `THIRD_PARTY_NOTICES.md`（版本、来源、用途），**都在发布包根目录**
+
+理由（如需要填写）：
+
+```
+mux.js 7.0.3 is bundled unmodified under Apache-2.0. The full license text and the
+copyright notice ship inside the package (LICENSE-APACHE-2.0.txt and
+THIRD_PARTY_NOTICES.md at the root). It is used only to demux MPEG-TS segments that
+the page's own player has already downloaded, and only when the user explicitly
+enables the optional bidirectional mode. It makes no network requests.
 ```
 
 ### Data usage（数据使用声明）
@@ -320,6 +375,25 @@ NOTES FOR THE REVIEWER:
   coming out through the extension's audio graph instead.
 - No login, no account, no payment, no network access is required or performed.
 - There is exactly one purpose and one control surface: a delay slider.
+
+ABOUT THE OPTIONAL BIDIRECTIONAL MODE (the small button on the panel):
+
+- It is OFF by default and is not needed to verify the core feature. Everything
+  above works without touching it.
+- It exists because some viewers need audio EARLIER than the picture. That is
+  impossible on the default capture path, so the extension obtains the same audio
+  from a second, already-downloaded source instead.
+- On pages that play native HLS, Chromium will show its own "started debugging
+  this browser" infobar while the mode is active. That is the extension reading
+  back the .ts segments the page's own player already downloaded — the only
+  channel that can access those bytes. It attaches only after the user clicks the
+  button and detaches as soon as the mode is left. It reads response bodies for
+  .ts / .m4s URLs only; it does not evaluate scripts, does not modify the page,
+  does not read cookies or storage, and issues no requests of its own.
+- If attaching fails (for example DevTools is already open), the extension falls
+  back to a different implementation automatically, and the feature still works.
+- The panel always displays which route is in use, so behaviour is visible to the
+  user rather than hidden.
 ```
 
 > 如果审核员所在地区的 YouTube 不可访问，**换一个你自建的公网测试页**（一个 `<video>` 标签 + 一个公开可用的 MP4 即可），把 URL 写进说明。这比让审核员自己找视频稳妥得多。
@@ -344,7 +418,8 @@ NOTES FOR THE REVIEWER:
 - [ ] **在真实 Edge 里完整跑通一次**：播放 → 点图标 → 接管 → 调延迟 → 停止
 - [ ] 截图 / 推广图 / logo 齐全
 - [ ] 隐私政策已部署，URL 可访问
-- [ ] 5 项权限理由逐条填写
+- [ ] **6 项权限**理由逐条填写（含 `debugger`，审核对它最敏感）
+- [ ] 第三方库声明：`mux.js` 选 Yes 并填表；确认 zip 里有 `LICENSE-APACHE-2.0.txt` 和 `THIRD_PARTY_NOTICES.md`
 - [ ] Certification notes 已填写，且明确写了「必须先播放音频」
 - [ ] 搜索词 ≤ 7 个
 
@@ -355,7 +430,9 @@ NOTES FOR THE REVIEWER:
 | 风险 | 触发条件 | 应对 |
 |---|---|---|
 | **功能不可用** | 审核员在静音标签页上点接管，捕获失败 | certification notes 里写死「先播放」，并提供自建测试页 URL |
-| **权限过度** | 5 项权限里有解释不清的 | 已逐条填写；`package.js` 也会校验权限与代码的对应关系 |
+| **权限过度** | 6 项权限里有解释不清的 | 已逐条填写；`package.js` 也会校验权限与代码的对应关系 |
+| **`debugger` 被质疑** | 审核认为「调试权限」与「调节音画延迟」无关 | 理由里写清三条：只读 `.ts/.m4s` 的响应体、只用 `Network` 域、用完立刻 detach；并强调默认模式完全不用它、attach 失败会自动降级 |
+| **第三方许可不清** | 包里带 `mux.min.js` 但没附许可 | 已随包分发 `LICENSE-APACHE-2.0.txt` + `THIRD_PARTY_NOTICES.md`，并保留文件首行的 `@license Apache-2.0` banner |
 | **描述不实** | 描述里出现「支持所有网站」「可调负延迟」之类 | 已在详情里明确写出「只能延后」「浏览器内部页不支持」 |
 | **截图不清** | 截图模糊、拉伸 | 尺寸严格 1280×800，非拉伸 |
 | **非生产构建** | 描述/说明里出现 "beta"、"experimental"、"测试中" | 文案里一个都别出现 |

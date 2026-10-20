@@ -36,7 +36,11 @@ const INCLUDE = [
   'icons/icon32.png',
   'icons/icon48.png',
   'icons/icon128.png',
-  'LICENSE'
+  'LICENSE',
+  /* mux.js 是 Apache-2.0，分发时必须随包带上许可全文和版权声明，
+     否则上架审核会以「第三方组件许可不清」打回。 */
+  'LICENSE-APACHE-2.0.txt',
+  'THIRD_PARTY_NOTICES.md'
 ];
 
 /* ---------------- zip ---------------- */
