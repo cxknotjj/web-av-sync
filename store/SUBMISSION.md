@@ -80,6 +80,8 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 
 ## 快捷键
 
+滚轮停在面板上直接滚，一格 100 毫秒，`Shift` 一格 1 秒，向上为增加。滚轮只作用于面板，不会滚动页面。
+
 鼠标悬停在面板上时：
 
 - `←` / `→` — 减 / 加 100 毫秒
@@ -136,7 +138,9 @@ That means:
 
 Click the icon again to stop; audio returns to the page instantly. The panel also has a stop button, and it keeps working in fullscreen.
 
-## Keyboard
+## Keyboard and mouse wheel
+
+Scroll while the pointer is over the panel: one notch is 100 ms, `Shift` makes it 1 s, scrolling up increases the value. The wheel is scoped to the panel and never scrolls the page.
 
 While hovering over the panel: `←` / `→` for 100 ms, `Shift + ←/→` for 1 s, `Home` to reset. Only active on hover, so it never fights the player's own arrow-key seeking.
 

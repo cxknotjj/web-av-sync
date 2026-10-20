@@ -395,7 +395,7 @@
         </div>
         <div class="meter"><div class="bar" data-el="bar"></div></div>
         <div class="foot">
-          <span class="tip" data-el="tip">悬停面板后 ←→ 微调 100ms</span>
+          <span class="tip" data-el="tip">滚轮 / ←→ 微调 100ms</span>
           <button class="stop" data-act="stop">停止</button>
         </div>
       </div>
@@ -444,6 +444,8 @@
   let sendTimer = null;
 
   function queueDelay(ms) {
+    /* 双向模式不走 tabCapture，延迟只作用于本地那条 audio 轨，不用通知 SW */
+    if (enhanced) return;
     pendingMs = ms;
     if (sendTimer) return;
     sendTimer = setTimeout(flush, 50);
@@ -524,6 +526,42 @@
     setValue(next);
     queueDelay(currentMs);
   }, true);
+
+  /* ---------------- 滚轮 ----------------
+   * 触控板一次滑动会连发几十个小 delta，必须累积到「一格」再动，
+   * 否则数值会乱跳；同时要拦掉默认滚动，不然面板一动页面就跟着跑。
+   */
+  const WHEEL_NOTCH = 100;
+  let wheelAcc = 0;
+  let wheelShift = false;
+  let wheelTimer = null;
+
+  function flushWheel() {
+    wheelTimer = null;
+    const notches = Math.trunc(wheelAcc / WHEEL_NOTCH);
+    wheelAcc -= notches * WHEEL_NOTCH;
+    if (!notches) return;
+
+    /* 向上滚 = 数值变大（声音更晚），和滑块向右拖一致 */
+    const step = wheelShift ? 1000 : 100;
+    setValue(currentMs - notches * step);
+    queueDelay(currentMs);
+  }
+
+  host.addEventListener('wheel', function (e) {
+    let d = e.deltaY;
+    /* deltaMode: 0=像素 1=行 2=页，统一折算成像素 */
+    if (e.deltaMode === 1) d *= 16;
+    else if (e.deltaMode === 2) d *= 400;
+    if (!d) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    wheelShift = e.shiftKey;
+    wheelAcc += d;
+    if (!wheelTimer) wheelTimer = setTimeout(flushWheel, 40);
+  }, { passive: false });
 
   /* 拖动：按住头部移动整个面板 */
   head.addEventListener('pointerdown', function (e) {
@@ -797,8 +835,8 @@
 
     if (tip) {
       tip.textContent = enhanced
-        ? '负值让声音提前，需要缓冲里有数据'
-        : '只延后声音，不影响画面';
+        ? '负值让声音提前 · 滚轮可调'
+        : '只延后声音 · 滚轮可调';
     }
 
     if (enhanced) {
@@ -918,7 +956,7 @@
   document.documentElement.appendChild(host);
 
   setValue(0);
-  tip.textContent = '只延后声音，不影响画面';
+  tip.textContent = '只延后声音 · 滚轮可调';
   updateModeUI();
 
   /* MAIN world 可能已经先跑完了，问一次它当前截到了什么 */
