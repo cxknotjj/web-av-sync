@@ -150,6 +150,13 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 
 降级也是可见的：② 抓不到切片时，指示条会从 `②` 变成 `③ 重新拉一路　约双倍流量`，不会让用户以为还在走省流量那条。
 
+**走 ③ 的时候会说明原因。** 指示条的悬停提示里带着 `routeWhy`，只有两种取值：
+
+- `页面是直连媒体（.mp4 / 非 m3u8），没有切片可抓` —— 这条链路本来就不存在，不是失败
+- `抓切片失败（调试器被占用，或页面上没有新的切片请求），已自动降级` —— 失败降级
+
+降级那一刻还会弹一次提示，因为这时候用户的流量会翻倍，不能只写在悬停里让人自己发现。
+
 三条链路的编号、名称、代价写在 `ads-enhance.js` 顶部的 `ROUTES` 表里，加链路只要往表里添一条；而「这次会走哪条」由 `pickRoute()` 统一判断，UI 预告和真正分派共用它，避免出现「预告说走①、实际跑③」。
 
 ### 限制
@@ -191,6 +198,32 @@ t.on('data', (seg) => {
 - **init segment 只 append 一次**：重复 append 会让 SourceBuffer 报错
 - **CDP 的 `frameId` 不能直接给 `chrome.tabs.sendMessage`**：前者是字符串，后者要数字，得用 content 自己报上来的 `sender.frameId`
 - **match pattern 里不能写端口**：`http://127.0.0.1:8124/*` 这种写法整条规则会失效，要写成 `http://127.0.0.1/*`（不带端口反而匹配所有端口）
+
+#### 为什么不 hook `fetch` / `XMLHttpRequest`
+
+很多站点（hls.js、shaka）确实是用 XHR / fetch 下载 ts 的，理论上在那儿劫持也能拿到字节。实际不这么做，是因为不划算——不是做不到。
+
+先摆两个实测事实（本地 hls.js + 单切片 ts）：
+
+```
+addSourceBuffer 调用: ["audio/mp4;codecs=mp4a.40.5", "video/mp4;codecs=avc1.42c00d"]
+主线程看得到:        ["XHR:playlist-one.m3u8", "XHR:seq1.ts"]     ← worker 开/关都一样
+```
+
+1. **hls.js 会把音视频拆成两个 SourceBuffer**，`audio/` 那条正好能被 `inject-main.js` 的 `^audio\//` 命中——链路①成立的前提就在这里。自研播放器如果合成单一 `video/mp4`，那条链路①就截不到。
+2. **hls.js 的 Web Worker 只做 transmux，下载仍在主线程**（xhr-loader），所以主线程 hook XHR 确实能看到切片请求。也就是说 hook fetch/XHR 技术上可行。
+
+不选它的三条理由，按分量排：
+
+| 理由 | 说明 |
+| --- | --- |
+| **覆盖面** | `appendBuffer` 是所有 MSE 播放器的必经点。fetch/XHR 只是实现细节：hls.js 用 XHR、shaka 用 fetch、还有流式读 `Response.body` 自己拼包的。hook 一套只覆盖一部分站点 |
+| **加密流拿不到明文** | hls.js 的 AES-128 解密发生在 loader **之后**，hook XHR 截到的是**密文**，还得自己实现解密和 IV/key 推导 |
+| **格式还要再转一手** | `appendBuffer` 给的是已经 remux 完、且已分轨的 fMP4，直接能喂 MSE；ts 还得引 mux.js demux |
+
+一句话：**在数据最"熟"的地方截，而不是最早的地方。**
+
+另外 `audioMime` 不是硬编码的，是从 `addSourceBuffer(mime)` 的实参读出来的（实测常见值是 `mp4a.40.5`，不是默认的 `mp4a.40.2`），自建 SourceBuffer 复用同一个字符串，编码参数天然一致。
 
 ### 链路③：直连媒体再拉一路（原生 HLS / mp4）
 
@@ -366,21 +399,42 @@ dist/              打好的提交包（package.js 产出）
 
 ## 开发
 
-Chrome **137 起移除了** **`--load-extension`**（防止恶意软件加载），所以命令行带不动未打包扩展了。两条路：
+### 加载未打包扩展：用 Edge，不要用 Chrome
 
-**日常改代码**：`chrome://extensions` → 开启开发者模式 → 加载已解压的扩展程序 → 改完点卡片上的刷新按钮。
+Chrome 137 起移除了 `--load-extension`。**Chrome 155 实测发现 CDP 的 `Extensions.loadUnpacked` 也失效了**——它会返回扩展 id，看着像成功，但扩展不起 service worker、content script 一个都不注入，重启浏览器后连安装记录都不剩。加 `--enable-unsafe-extension-debugging` 也救不回来。
 
-**需要自动化时**，用 CDP 的 `Extensions.loadUnpacked`：
+Edge 没有这个问题（实测 `151.0.4129.93`，`--load-extension` 正常工作），所以自动化测试全部跑在 Edge 上：
+
+```cmd
+"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --user-data-dir="...\test-env\profile-dev" --load-extension="...\test-env\ext" --disable-extensions-except="...\test-env\ext" --remote-debugging-port=9227 --no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required
+```
+
+三个必须同时满足的条件：
+
+- **`--load-extension` 和 `--disable-extensions-except` 成对给**，只加载这一个扩展。否则别的扩展可能先占住 debugger，链路②直接 attach 失败
+- **每次换一个新的 `--user-data-dir`**。浏览器会从旧 profile 恢复扩展副本，对已存在的路径再 `loadUnpacked` 是空操作——你会以为在测新代码，其实跑的是上次的
+- **测试用 `test-env/ext` 那份副本**，改完源文件先 `cp` 过去再重启
+
+> `test-env/` 是本地脚手架，整目录在 `.gitignore` 里：临时扩展副本、hls.js、测试切片都不入库。下文提到它时都是指你本机这份。
+
+改完代码必须重启浏览器才能生效，`--load-extension` 加载的是启动那一刻的文件快照。
+
+手工路线依然可用：`edge://extensions` → 开发者模式 → 加载已解压的扩展程序，改完点卡片上的刷新按钮。适合看一点改一点。
+
+### 本地测试台
+
+链路② 需要一个「切片请求会真的发出去」的环境，这里有两个坑，都踩过：
+
+- **不要把同一个 ts 复制多份拼 playlist**。8 片内容相同意味着时间戳重复，Chrome 会报
+  `CHUNK_DEMUXER_ERROR_APPEND_FAILED` 然后卡死，此后不再请求任何切片。要测就用单切片列表，或者真正时间戳连续的切片。
+- **`python -m http.server` 不能用来测这条链路**。它不发 `Cache-Control`，单切片重新加载时 ts 会命中磁盘缓存，浏览器**压根不发请求**，`Network.requestWillBeSent` 一条都不来——现象和「attach 失败」一模一样，很容易查错方向。
 
 ```bash
-# 1. 带扩展调试开关启动一个独立实例
-chrome.exe --remote-debugging-port=9226 \
-           --enable-unsafe-extension-debugging \
-           --user-data-dir=/tmp/ads-test about:blank
-
-# 2. 通过 CDP 加载（会打印扩展 ID）
-CDP_PORT=9226 node tools/load-unpacked.js
+node tools/serve-hls.js                                # 默认服务 test-env/hls，端口 8127
+node tools/serve-hls.js --root ./some-dir --port 8127  # 换目录
 ```
+
+> `tools/serve-hls.js` 本身在仓库内，`--root` 可以指到你放切片的地方。
 
 重新生成图标与商店素材：
 
@@ -436,7 +490,7 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 
 1. **视频在播吗** —— 没有正在播放的音频，捕获会直接失败，顶部会弹提示
 2. **是不是浏览器内部页** —— `chrome://`、扩展商店、PDF 阅读器不允许捕获
-3. **看 service worker 控制台** —— `chrome://extensions` → 该扩展 → 检查视图 → Service Worker，红色报错就是原因
+3. **看 service worker 控制台** —— `edge://extensions`（Chrome 是 `chrome://extensions`）→ 该扩展 → 检查视图 → Service Worker，红色报错就是原因
 4. **看 offscreen 是否被创建** —— 控制台里 `chrome.offscreen.hasDocument()` 应该返回 `true`
 5. **AudioContext 状态** —— 如果是 `suspended`，点一下页面再重试
 
@@ -460,6 +514,69 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 **声音有咔哒声**
 
 拖动滑块时 `delayTime` 在 60ms 内线性过渡。如果特别频繁地大幅拖动，偶尔会有轻微跳音——这是 `DelayNode` 的固有特性，无法完全消除。
+
+### 双向模式没按预期走链路
+
+**第一步永远是这一行**，F12 → Console：
+
+```js
+document.documentElement.dataset.adsState
+```
+
+输出扩展当下的内部判断：
+
+```json
+{"kind":"hls","mux":true,"hookInstalled":true,"hookReady":false,"chunks":0,
+ "enhanced":true,"mode":"capture","why":"",
+ "videoSrc":"http://127.0.0.1:8127/playlist-one.m3u8","videoPaused":false}
+```
+
+之所以写在 DOM 上：内容脚本跑在**隔离世界**，主世界 Console 读不到 `window.ADS`，DOM 是两边唯一的公共面。这也是这个功能唯一可自动化的观测点。
+
+返回值是一个字符串，想看结构再套一层：
+
+```js
+JSON.parse(document.documentElement.dataset.adsState)
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `kind` | 播放方式：`mse` / `hls` / `direct` / `stream` / `unknown` / `none` |
+| `mux` | mux.js 是否可用。为 `false` 时 ② 直接被跳过 |
+| `hookInstalled` / `hookReady` | 增强脚本装上了 / 真的截到音频轨（两者是两件事） |
+| `mode` | 当前链路：`mse` / `capture` / `src` |
+| `why` | 落到 ③ 的原因，与指示条悬停提示同源 |
+| `videoSrc` | 视频地址，判断有没有切片可抓就看它 |
+
+**第二步：看抓切片的轨迹**
+
+```js
+document.documentElement.dataset.adsDiag
+```
+
+形如 `|attach-ok|evt:playlist.m3u8|hit:seq1.ts|fin|body:173580`。按顺序对：
+
+| 缺哪段 | 含义 | 处理方向 |
+| --- | --- | --- |
+| 没有 `attach-ok` | attach 失败 | 看 SW 控制台的原始错误，多半是页面开着 DevTools |
+| 有 `attach-ok` 没 `evt:` | Network 域没生效，或此后页面没发请求 | 确认点按钮后页面还在加载切片 |
+| 有 `evt:` 没 `hit:` | URL 过滤没匹配上 | 有些站切片不带 `.ts` 后缀 |
+| 有 `hit:` 没 `fin` | 流式请求悬着不结束 | 只能靠 12 秒超时降级 |
+| 有 `fin` 没 `body` | 响应体已被回收 | 检查 `Network.enable` 的 buffer 参数 |
+
+**三种观察通道，各有不可替代的位置**
+
+1. **service worker 控制台**（`edge://extensions` → 检查视图 → Service Worker）——唯一能看到 attach 原始错误的地方
+2. **页面 DOM 上的 `adsState` / `adsDiag`** ——不用开 SW 的 DevTools，且保留了时序
+3. **外部 CDP 脚本** ——连 `--remote-debugging-port` 读页面状态，适合回归
+
+**一个反直觉的失败**
+
+② 挂上了却抓不到，最常见的原因不是权限也不是代码，而是**页面上没有新的切片请求**：你在播放中途点按钮，如果视频已经缓冲到边界、或者刚好暂停，attach 之后就没有新 ts 可抓，12 秒后降级 ③。这是取舍（不能无限等），不是 bug。
+
+**面板显示「此页不支持双向」**
+
+说明 `pickVideo()` 没找到 `<video>`——页面可能还在加载、播放器在别的框架里、或者内容根本没加载出来。这种情况三条链路都无从下手，跟 debugger 无关。
 
 ***
 
