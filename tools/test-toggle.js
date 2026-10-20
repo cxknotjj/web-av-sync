@@ -24,6 +24,7 @@ function makeEnv(opts) {
     injectFails: o.injectFails || false,
     hasOrigin: o.hasOrigin || false,
     grantPermission: o.grantPermission || false,
+    requestThrows: o.requestThrows || null,
     origins: o.origins || [],
     log: log
   };
@@ -103,6 +104,7 @@ function makeEnv(opts) {
       contains: async () => !!env.hasOrigin,
       request: async (req) => {
         log.push('perm.request:' + ((req.origins || [])[0] || ''));
+        if (env.requestThrows) throw new Error(env.requestThrows);
         return !!env.grantPermission;
       }
     },
@@ -163,6 +165,18 @@ function has(env, entry) {
 
 async function settle() {
   for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 5));
+}
+
+/** 模拟 content script 发来的授权请求 */
+function askEnhance(env, tabId, origin) {
+  return new Promise((resolve) => {
+    const ret = env.onMsg(
+      { target: 'sw', type: 'requestEnhance', origin: origin },
+      { tab: { id: tabId } },
+      resolve
+    );
+    if (ret !== true) resolve(undefined);
+  });
 }
 
 async function main() {
@@ -265,75 +279,60 @@ async function main() {
     check('清掉了当前标签页', env.currentTabId === null, String(env.currentTabId));
   }
 
-  /* ---- 8. 授权：面板按钮只登记，点图标才真正请求 ---- */
-  console.log('\n[8] 授权必须等到点图标，不能在消息里直接请求');
+  /* ---- 8. 面板按钮直接授权：一次点击就够 ---- */
+  console.log('\n[8] 点面板按钮应直接发起授权请求');
   {
-    const env = makeEnv({ hasOrigin: false, grantPermission: true });
-
-    const ask = () => new Promise((resolve) => {
-      const ret = env.onMsg(
-        { target: 'sw', type: 'requestEnhance', origin: 'https://example.com' },
-        { tab: { id: 7 } },
-        resolve
-      );
-      if (ret !== true) resolve(undefined);
-    });
-
-    const r1 = await ask();
-    await settle();
-    check('返回 needGesture', r1 && r1.needGesture === true, JSON.stringify(r1));
-    check('没有在消息里调 permissions.request', !env.log.some((x) => x.indexOf('perm.request') === 0), env.log.join(' | '));
-    check('登记了待授权', has(env, 'session.set:pendingEnhance'), env.log.join(' | '));
-    check('图标打了提示角标', has(env, 'badge:↑'), env.log.join(' | '));
-
-    env.log.length = 0;
-    await env.onClick({ id: 7 });
-    await settle();
-    check('点图标时才请求权限', has(env, 'perm.request:https://example.com/*'), env.log.join(' | '));
-    check('授权后没有去接管', !has(env, 'capture:7'), env.log.join(' | '));
-    check('授权后清掉了角标', has(env, 'badge:clear'), env.log.join(' | '));
-    check('提示用户刷新', has(env, 'tab:7:panel-notice'), env.log.join(' | '));
-    check('提示内容是成功语气', has(env, 'session.remove:pendingEnhance'), env.log.join(' | '));
-  }
-
-  /* ---- 9. 用户拒绝授权：不接管、不留状态 ---- */
-  console.log('\n[9] 用户拒绝授权时不能顺手接管');
-  {
-    const env = makeEnv({ hasOrigin: false, grantPermission: false });
-    await new Promise((resolve) => {
-      const ret = env.onMsg(
-        { target: 'sw', type: 'requestEnhance', origin: 'https://example.com' },
-        { tab: { id: 7 } },
-        resolve
-      );
-      if (ret !== true) resolve(undefined);
-    });
-    await settle();
-    env.log.length = 0;
-    await env.onClick({ id: 7 });
-    await settle();
-    check('请求过权限', has(env, 'perm.request:https://example.com/*'));
-    check('没有接管', !has(env, 'capture:7'), env.log.join(' | '));
-    check('清掉了角标', has(env, 'badge:clear'));
-    check('弹了失败提示', has(env, 'tab:7:panel-notice'), env.log.join(' | '));
-  }
-
-  /* ---- 10. 已授权站点再点按钮：直接注册，不再要手势 ---- */
-  console.log('\n[10] 已授权的站点点按钮应直接生效');
-  {
-    const env = makeEnv({ hasOrigin: true });
-    const r = await new Promise((resolve) => {
-      const ret = env.onMsg(
-        { target: 'sw', type: 'requestEnhance', origin: 'https://example.com' },
-        { tab: { id: 7 } },
-        resolve
-      );
-      if (ret !== true) resolve(undefined);
-    });
+    const env = makeEnv({ grantPermission: true });
+    const r = await askEnhance(env, 7, 'https://example.com');
     await settle();
     check('返回 ok 且要求刷新', r && r.ok === true && r.needsReload === true, JSON.stringify(r));
+    check('同步请求了权限', has(env, 'perm.request:https://example.com/*'), env.log.join(' | '));
+    check('注册了两段脚本', has(env, 'register:2'));
+    check('没有走「点图标」降级', !has(env, 'session.set:pendingEnhance'), env.log.join(' | '));
+    check('没有顺手接管', !has(env, 'capture:7'));
+  }
+
+  /* ---- 9. 用户拒绝授权 ---- */
+  console.log('\n[9] 用户拒绝授权时应如实返回失败');
+  {
+    const env = makeEnv({ grantPermission: false });
+    const r = await askEnhance(env, 7, 'https://example.com');
+    await settle();
+    check('返回失败', r && r.ok === false, JSON.stringify(r));
+    check('没有注册脚本', !has(env, 'register:2'));
+    check('没有接管', !has(env, 'capture:7'));
+  }
+
+  /* ---- 10. 手势没传过来时降级到「点图标」 ---- */
+  console.log('\n[10] 手势丢失时应降级为点图标授权');
+  {
+    const env = makeEnv({ requestThrows: 'This function must be called during a user gesture' });
+    const r = await askEnhance(env, 7, 'https://example.com');
+    await settle();
+    check('返回 needGesture', r && r.needGesture === true, JSON.stringify(r));
+    check('登记了待授权', has(env, 'session.set:pendingEnhance'), env.log.join(' | '));
+    check('图标打了角标', has(env, 'badge:↑'), env.log.join(' | '));
+
+    /* 点图标这一跳手势是浏览器亲自派的，应该能成功 */
+    env.requestThrows = null;
+    env.grantPermission = true;
+    env.log.length = 0;
+    await env.onClick({ id: 7 });
+    await settle();
+    check('点图标时才真正请求', has(env, 'perm.request:https://example.com/*'), env.log.join(' | '));
+    check('授权后没有接管', !has(env, 'capture:7'), env.log.join(' | '));
+    check('授权后清了角标', has(env, 'badge:clear'));
+    check('提示用户刷新', has(env, 'tab:7:panel-notice'));
+  }
+
+  /* ---- 11. 已授权站点再点按钮：直接注册，不重复要权限 ---- */
+  console.log('\n[11] 已授权站点应直接注册');
+  {
+    const env = makeEnv({ hasOrigin: true, grantPermission: true });
+    const r = await askEnhance(env, 7, 'https://example.com');
+    await settle();
+    check('返回 ok', r && r.ok === true, JSON.stringify(r));
     check('注册了两段脚本', has(env, 'register:2'), env.log.join(' | '));
-    check('没有再要一次权限', !has(env, 'perm.request:https://example.com/*'));
   }
 
   console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');

@@ -111,13 +111,14 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 
 1. 先把视频播起来
 2. 点图标接管，面板右下角会显示「双向需授权」
-3. 点它 —— 浏览器不允许扩展在网页里直接申请权限，所以这里只会告诉你下一步
-4. **再点一下工具栏图标**，弹出授权框，同意（图标上会出现 `↑` 角标提示你点这里）
-5. **刷新一次页面**，面板上出现「启用双向」，点一下切过去
+3. 点它，浏览器弹出授权框，点「允许」
+4. **刷新一次页面**，面板上出现「启用双向」，点一下切过去
 
-第 3、4 步分两次是浏览器的硬性要求：`chrome.permissions.request` 必须由真人手势触发，而网页里的点击经过消息转发后手势就丢了（会报 `This function must be called during a user gesture`）。唯一可靠的入口是工具栏图标，那个手势由浏览器自己派发。
+第 3 步能一次点完，靠的是**手势能撑过 content script → service worker 这一跳**。但前提是 service worker 里 `chrome.permissions.request` 之前不能有任何 `await` —— 哪怕只是先查一下有没有授权，手势也会失效，报 `This function must be called during a user gesture`。
 
-第 5 步的刷新也躲不掉：`init segment`（定义音频编码参数的那段）只在播放器初始化时 append 一次，扩展必须在那之前就装好 hook。
+万一某个版本没把手势传过来，扩展会自动退回「点一下图标授权」：图标上出现 `↑` 角标，点图标即可完成。
+
+第 4 步的刷新躲不掉：`init segment`（定义音频编码参数的那段）只在播放器初始化时 append 一次，扩展必须在那之前就装好 hook。
 
 ### 限制
 

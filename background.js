@@ -207,10 +207,17 @@ async function toggle(tab) {
   await stateReady;
   await prefReady;
 
-  /* 这次点图标是来完成「双向模式」授权的，不接管 */
-  const pending = await peekPendingEnhance();
-  if (pending && pending.tabId === tabId) {
-    await completeEnhance(tabId, pending.origin);
+  /* 走到这里说明同步段没命中待授权（SW 中途被回收，内存镜像丢了）。
+     绝不能在这里请求权限 —— 前面的 await 已经把这次手势耗掉了。 */
+  const stale = await peekPendingEnhance();
+  if (stale && stale.tabId === tabId) {
+    await clearPendingEnhance();
+    await clearNeedGesture(tabId);
+    await sendToTab(tabId, {
+      type: 'panel-notice',
+      kind: 'error',
+      text: '授权状态已失效，请重新点面板上的「双向需授权」。'
+    });
     return;
   }
 
@@ -281,14 +288,6 @@ async function flashBadge(tabId) {
 
 const ENHANCED_IDS = ['ads-main', 'ads-content'];
 
-async function hasOriginPermission(origin) {
-  try {
-    return await chrome.permissions.contains({ origins: [origin + '/*'] });
-  } catch (e) {
-    return false;
-  }
-}
-
 async function registerEnhanced(origins) {
   try {
     const old = await chrome.scripting.getRegisteredContentScripts({ ids: ENHANCED_IDS });
@@ -338,15 +337,19 @@ async function rebuildEnhanced() {
 const PENDING_KEY = 'pendingEnhance';
 const PENDING_TTL = 5 * 60 * 1000;
 
-async function setPendingEnhance(tabId, origin) {
-  try {
-    await chrome.storage.session.set({
-      [PENDING_KEY]: { tabId: tabId, origin: origin, at: Date.now() }
-    });
-  } catch (e) {}
+/* 内存镜像。onClicked 里必须「同步」拿到 origin —— 只要 await 一次，
+   手势就被判失效，permissions.request 会报 "must be called during a user gesture"。 */
+let pendingCache = null;
+
+function setPendingEnhance(tabId, origin) {
+  pendingCache = { tabId: tabId, origin: origin, at: Date.now() };
+  return chrome.storage.session
+    .set({ [PENDING_KEY]: pendingCache })
+    .catch(function () {});
 }
 
 async function peekPendingEnhance() {
+  if (pendingCache && Date.now() - (pendingCache.at || 0) <= PENDING_TTL) return pendingCache;
   try {
     const r = await chrome.storage.session.get(PENDING_KEY);
     const p = r && r[PENDING_KEY];
@@ -355,15 +358,20 @@ async function peekPendingEnhance() {
       await chrome.storage.session.remove(PENDING_KEY);
       return null;
     }
+    pendingCache = p;
     return p;
   } catch (e) {
     return null;
   }
 }
 
-async function clearPendingEnhance() {
-  try { await chrome.storage.session.remove(PENDING_KEY); } catch (e) {}
+function clearPendingEnhance() {
+  pendingCache = null;
+  return chrome.storage.session.remove(PENDING_KEY).catch(function () {});
 }
+
+/* SW 启动时预热缓存：万一上次的 pending 还没处理完 */
+peekPendingEnhance().catch(function () {});
 
 /** 图标上打个标记，明确告诉用户「下一步点这里」 */
 async function markNeedGesture(tabId) {
@@ -382,69 +390,84 @@ async function clearNeedGesture(tabId) {
 }
 
 /**
- * 面板按钮点进来。没权限就只登记，等下一次点图标。
+ * 面板按钮直接授权。
+ *
+ * 关键：permissions.request 必须是这个消息处理器里「第一个异步操作」。
+ * 手势能撑过 content script → service worker 这一跳，但撑不过任何 await。
+ * 旧代码先 await permissions.contains()，手势就没了，必然报
+ * "This function must be called during a user gesture"。
+ *
+ * 已授权的站点再调 request 会立即返回 true 且不弹框，所以不需要先 contains。
  */
-async function requestEnhance(origin, tabId) {
+function requestEnhanceInline(origin, tabId, sendResponse) {
   if (!origin || !/^https?:/i.test(origin)) {
-    return { ok: false, error: '这个页面不支持（只对 http / https 站点生效）' };
+    sendResponse({ ok: false, error: '这个页面不支持（只对 http / https 站点生效）' });
+    return false;
   }
 
-  try {
-    /* 可能之前在别的标签页已经授权过同一个站点。
-       这里直接按 origin 注册，不依赖 getAll() 的结果 —— 后者拿不全就白跑。 */
-    if (await hasOriginPermission(origin)) {
-      await registerEnhanced([origin]);
-      return { ok: true, needsReload: true };
-    }
+  chrome.permissions.request({ origins: [origin + '/*'] })
+    .then(function (granted) {
+      if (!granted) {
+        sendResponse({ ok: false, error: '没有授权。想用双向模式时可以再点一次。' });
+        return undefined;
+      }
+      return registerEnhanced([origin]).then(function () {
+        sendResponse({ ok: true, needsReload: true });
+      });
+    })
+    .catch(function (e) {
+      const msg = (e && e.message) || String(e);
 
-    if (typeof tabId !== 'number') {
-      return { ok: false, error: '找不到当前标签页，刷新页面后重试。' };
-    }
+      /* 万一某些版本没把手势传过来：退回「点图标」这条路，别让用户卡死 */
+      if (/user gesture/i.test(msg) && typeof tabId === 'number') {
+        setPendingEnhance(tabId, origin);
+        markNeedGesture(tabId);
+        sendResponse({
+          ok: false,
+          needGesture: true,
+          error: '这个环境下手势没能传过来。点一下工具栏图标即可完成授权（图标角标已亮）。'
+        });
+        return;
+      }
 
-    await setPendingEnhance(tabId, origin);
-    await markNeedGesture(tabId);
+      sendResponse({ ok: false, error: '授权失败：' + msg });
+    });
 
-    return {
-      ok: false,
-      needGesture: true,
-      error: '浏览器规定网站权限必须由你亲自点图标才能申请。点一下工具栏上的扩展图标，会弹出授权框——这一步只做授权，不会开始接管。'
-    };
-  } catch (e) {
-    return { ok: false, error: '授权失败：' + ((e && e.message) || String(e)) };
-  }
+  return true; /* 异步 sendResponse */
 }
 
-/** 由点图标触发的真正授权。这里手势是有效的。 */
-async function completeEnhance(tabId, origin) {
-  try {
-    const granted = await chrome.permissions.request({ origins: [origin + '/*'] });
-    await clearNeedGesture(tabId);
+/**
+ * 授权的收尾：只处理结果，不发起请求。
+ * 请求本身必须在 onClicked 的同步段里发起（见下面的 onClicked）。
+ */
+async function settleEnhance(tabId, origin, granted, err) {
+  await clearNeedGesture(tabId);
+  await clearPendingEnhance();
 
-    if (!granted) {
-      await sendToTab(tabId, {
-        type: 'panel-notice',
-        kind: 'error',
-        text: '没有授权，双向模式仍然不可用。需要时可以再点一次面板上的按钮。'
-      });
-      return;
-    }
-
-    await clearPendingEnhance();
-    await rebuildEnhanced();
-
-    await sendToTab(tabId, {
-      type: 'panel-notice',
-      kind: 'ok',
-      text: '已授权当前站点。刷新一次页面，面板上就会出现「启用双向」。'
-    });
-  } catch (e) {
-    await clearNeedGesture(tabId);
+  if (err) {
     await sendToTab(tabId, {
       type: 'panel-notice',
       kind: 'error',
-      text: '授权失败：' + ((e && e.message) || String(e))
+      text: '授权失败：' + ((err && err.message) || String(err))
     });
+    return;
   }
+
+  if (!granted) {
+    await sendToTab(tabId, {
+      type: 'panel-notice',
+      kind: 'error',
+      text: '没有授权，双向模式仍然不可用。需要时可以再点一次面板上的按钮。'
+    });
+    return;
+  }
+
+  await registerEnhanced([origin]);
+  await sendToTab(tabId, {
+    type: 'panel-notice',
+    kind: 'ok',
+    text: '已授权当前站点。刷新一次页面，面板上就会出现「启用双向」。'
+  });
 }
 
 /* 每次 SW 启动把已授权站点重新注册一遍（浏览器可能清掉动态脚本） */
@@ -463,6 +486,25 @@ function broadcast(msg) {
 }
 
 chrome.action.onClicked.addListener(function (tab) {
+  /* 待授权：必须在这个同步执行段里直接发起请求。
+     permissions.request 只认当前任务的手势，只要 await 一次
+     （哪怕只是读 storage），就会报
+     "This function must be called during a user gesture"。
+     所以这里读的是内存镜像 pendingCache，不是 storage。 */
+  const p = pendingCache;
+  if (p && p.tabId === tab.id && Date.now() - (p.at || 0) <= PENDING_TTL) {
+    pendingCache = null;
+
+    chrome.permissions.request({ origins: [p.origin + '/*'] })
+      .then(function (granted) {
+        return settleEnhance(tab.id, p.origin, granted, null);
+      })
+      .catch(function (e) {
+        return settleEnhance(tab.id, p.origin, false, e);
+      });
+    return;
+  }
+
   toggle(tab).catch(function () {});
 });
 
@@ -497,8 +539,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       getState().then(sendResponse);
       return true;
     case 'requestEnhance':
-      requestEnhance(msg.origin, sender && sender.tab && sender.tab.id).then(sendResponse);
-      return true;
+      return requestEnhanceInline(msg.origin, sender && sender.tab && sender.tab.id, sendResponse);
     default:
       return false;
   }
