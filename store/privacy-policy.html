@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>隐私政策 · 音画偏移 · 标签页音频</title>
+<style>
+  :root {
+    --bg: #ffffff; --text: #1c2024; --dim: #5c6770;
+    --line: #e3e7eb; --code-bg: #f5f7f9; --accent: #0a7ea4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --text: #e6edf3; --dim: #8b949e;
+      --line: #232a33; --code-bg: #161b22; --accent: #22d3ee;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 48px 24px 96px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.75 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 600; letter-spacing: -.3px; margin: 0 0 6px; }
+  h2 { font-size: 18px; font-weight: 600; margin: 40px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); }
+  h3 { font-size: 15px; font-weight: 600; margin: 26px 0 8px; }
+  .meta { color: var(--dim); font-size: 13px; margin: 0 0 32px; }
+  .lede {
+    margin: 0 0 8px; padding: 18px 20px; border-radius: 10px;
+    background: var(--code-bg); border-left: 3px solid var(--accent);
+  }
+  .lede strong { color: var(--accent); }
+  p, li { color: var(--text); }
+  ul { padding-left: 22px; }
+  li { margin: 4px 0; }
+  code {
+    font: 13px/1.5 ui-monospace, "SF Mono", Consolas, monospace;
+    background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 16px 18px; overflow-x: auto;
+    font: 12.5px/1.65 ui-monospace, "SF Mono", Consolas, monospace;
+  }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--dim); font-size: 13px; }
+  td:first-child { white-space: nowrap; }
+  .dim { color: var(--dim); font-size: 13px; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 40px 0; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+
+<h1>隐私政策</h1>
+<p class="meta">
+  适用于浏览器扩展 <strong>音画偏移 · 标签页音频</strong>（Audio Delay · Tab Audio）<br>
+  最后更新：2026-10-19
+</p>
+
+<p class="lede">
+  <strong>一句话版本：</strong>本扩展不收集、不上传、不存储任何用户数据。所有音频处理都在你自己的电脑上、在你的浏览器里完成，不经过任何服务器。
+</p>
+
+<h2>本扩展做什么</h2>
+<p>本扩展把<strong>当前标签页</strong>已经渲染出来的音频，通过浏览器的 Web Audio <code>DelayNode</code> 延迟一小段时间后重新输出，用于修正视频音画不同步（例如蓝牙耳机、投屏、录屏场景下的口型错位）。</p>
+<p>它<strong>不读取网页内容</strong>，不修改页面，不下载、不录制、不保存任何音视频。</p>
+
+<h2>处理了哪些数据</h2>
+<table>
+  <thead>
+    <tr><th>数据</th><th>是否处理</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>标签页音频流</td>
+      <td>是</td>
+      <td>仅在用户点击「接管当前标签页」后建立，用户点击「停止」或关闭标签页时立即销毁。音频样本仅在内存中的 <code>DelayNode</code> 里停留最多 10.5 秒，随后输出到扬声器，<strong>不落盘、不编码、不传输</strong>。</td>
+    </tr>
+    <tr>
+      <td>音频电平（RMS）</td>
+      <td>是</td>
+      <td>每 150 毫秒算一次响度，只用于驱动界面上的电平条动画。数值仅存在于内存，不存储、不发送。</td>
+    </tr>
+    <tr>
+      <td>延迟设置</td>
+      <td>是</td>
+      <td>你拖动的延迟值（0–10000 毫秒）保存在浏览器本地存储 <code>chrome.storage</code> 中，仅用于下次打开面板时恢复上次的数值。<strong>不离开你的设备。</strong></td>
+    </tr>
+    <tr>
+      <td>当前标签页 ID</td>
+      <td>是</td>
+      <td>进程内使用，用于把音频流和标签页对应起来。关闭后清除。</td>
+    </tr>
+    <tr>
+      <td>浏览历史 / URL / 页面内容</td>
+      <td><strong>否</strong></td>
+      <td>本扩展没有申请 <code>tabs</code>、<code>history</code>、<code>webNavigation</code> 等权限，技术上无法读取。</td>
+    </tr>
+    <tr>
+      <td>账号 / 邮箱 / 位置 / 设备标识</td>
+      <td><strong>否</strong></td>
+      <td>不申请，不生成，不采集。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>权限用途</h2>
+<p>本扩展共申请 5 项权限，全部为功能所必需：</p>
+<ul>
+  <li><code>tabCapture</code> — 获取当前标签页的音频流。这是本扩展的核心能力，没有它无法工作。</li>
+  <li><code>offscreen</code> — 在隐藏文档中运行 Web Audio。MV3 的 service worker 不能直接用 Web Audio，必须借助 offscreen 文档。</li>
+  <li><code>storage</code> — 记住你上次设置的延迟值。</li>
+  <li><code>activeTab</code> — 只在你主动点击扩展图标时，才获得当前标签页的临时访问权。不常驻，不跨标签页。</li>
+  <li><code>scripting</code> — 在<strong>你已授权的那个标签页</strong>里注入一个悬浮调节面板。注入失败不影响音频功能。</li>
+</ul>
+<p>本扩展<strong>没有</strong>申请任何 <code>host_permissions</code>，不声明任何特定网站域名，因此无法在后台读取任何网页。</p>
+
+<h2>网络请求</h2>
+<p><strong>零。</strong>本扩展不发起任何网络请求，不加载任何远程脚本、字体、图片或统计代码。所有代码和图标都打包在扩展内部，可离线使用。</p>
+<p>因此本扩展也不涉及「远程代码执行」（remote code），符合 MV3 的 CSP 要求。</p>
+
+<h2>第三方共享</h2>
+<p><strong>没有。</strong>不与任何第三方共享数据，因为根本不采集数据。</p>
+
+<h2>儿童隐私</h2>
+<p>本扩展不面向 13 岁以下儿童，也不收集任何年龄信息或个人信息。</p>
+
+<h2>政策变更</h2>
+<p>若未来版本的功能变更导致数据处理方式变化（例如新增功能需要网络请求），本页面会先行更新并标注新的「最后更新」日期。</p>
+
+<h2>联系方式</h2>
+<p>如有疑问，请通过商店详情页的「支持」链接联系开发者。</p>
+
+<h2>技术附录：音频数据流的完整路径</h2>
+<p class="dim">供需要审计的用户和审核人员参考。</p>
+<pre><code>标签页最终混音
+   ↓ chrome.tabCapture.getMediaStreamId()   ← 用户点击图标时才授权
+MediaStream（仅音频，video:false）
+   ↓ getUserMedia({ audio: { mandatory: { chromeMediaSource: 'tab', ... } } })
+MediaStreamAudioSourceNode
+   ↓
+DelayNode（delayTime ≤ 10.5s）→ AudioContext.destination → 扬声器
+   ↓
+AnalyserNode（只读电平，不采样、不记录）</code></pre>
+<p>音频全程在浏览器的音频线程中流转，不进入任何网络栈，不写入任何文件。</p>
+<p>捕获期间标签页自身会静音（浏览器强制行为），所以这条链路是用户唯一的出声通道——这也意味着<strong>扩展一旦停止，声音立即回到页面本身</strong>，不会残留任何后台进程。</p>
+
+<hr>
+<p class="dim">本页面为纯静态页面，不含脚本、不含 Cookie、不含任何统计或追踪代码。</p>
+
+</main>
+</body>
+</html>

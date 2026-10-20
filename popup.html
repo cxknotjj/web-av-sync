@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="shell">
+
+  <header class="head">
+    <span class="dot" id="dot"></span>
+    <span class="title">音画偏移</span>
+    <span class="tag" id="tag">未接管</span>
+  </header>
+
+  <div class="stage">
+    <div class="readout">
+      <span class="num" id="num">0.000</span>
+      <span class="unit">s</span>
+    </div>
+    <p class="hint" id="hint">声音比画面晚多少，就往右拖</p>
+  </div>
+
+  <div class="slider-wrap">
+    <input type="range" id="slider" min="0" max="10000" step="100" value="0"
+           aria-label="音频延迟">
+    <div class="scale"><span>0</span><span>+5s</span><span>+10s</span></div>
+  </div>
+
+  <div class="steps">
+    <button type="button" data-step="-1000" title="减 1 秒">−1s</button>
+    <button type="button" data-step="-100" title="减 100 毫秒">−100</button>
+    <button type="button" data-step="100" title="加 100 毫秒">+100</button>
+    <button type="button" data-step="1000" title="加 1 秒">+1s</button>
+  </div>
+
+  <button type="button" id="main" class="primary">接管当前标签页</button>
+
+  <div class="meter" title="延迟后的输出电平">
+    <div class="bar" id="bar"></div>
+  </div>
+
+  <p class="msg" id="msg"></p>
+</div>
+<script src="popup.js"></script>
+</body>
+</html>
