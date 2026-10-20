@@ -145,6 +145,67 @@ audio.currentTime = video.currentTime − currentMs/1000
 - **ts 切片不能直接喂 MSE**：`MediaSource.isTypeSupported('video/mp2t')` 虽然返回 true，但 `addSourceBuffer('video/mp2t')` 实测抛 `NotSupportedError`——`isTypeSupported` 会撒谎，必须以实际 append 为准
 - 代价：同一路流下载和解码各跑两遍
 
+### 两条路线的完整对照
+
+| | MSE 路线（`blob:`） | 直连路线（`.m3u8` / `.mp4`） |
+|---|---|---|
+| 触发条件 | 页面用 hls.js / dash.js 等 MSE 播放器 | `video.currentSrc` 是直连地址 |
+| 数据来源 | `MediaSource.prototype.addSourceBuffer` 处截获的 fMP4 片段 | 浏览器对同一 URL 再解码一遍 |
+| 额外带宽 | **零**（复用页面已下载的） | **双倍** |
+| 额外解码 | 双倍 | 双倍 |
+| 需要的权限 | 站点授权（`optional_host_permissions`）+ 刷新一次 | **零权限、零刷新** |
+| 注入时机 | 必须 `document_start`，否则拿不到 init segment | 无要求，点一下就行 |
+| 失效场景 | 页面不用 MSE | 流需要 Referer/token 校验、DRM、直播窗口太窄 |
+
+两条路共用同一套 UI 和同步循环（`syncTick`），只有"音频从哪来"这一段不同：
+
+```js
+if (kind === 'mse') {
+  enhMS = new MediaSource();
+  enhMS.__adsOwn = true;                       // 避免 hook 抓到自己
+  enhAudio.src = URL.createObjectURL(enhMS);
+  enhMS.addEventListener('sourceopen', function () {
+    enhBuf = enhMS.addSourceBuffer(audioMime); // audio/mp4; codecs="mp4a.40.2"
+    enhBuf.addEventListener('updateend', pump); // 把缓存的片段依次塞进去
+  });
+} else {
+  enhAudio.src = video.currentSrc;            // 直连：交给浏览器自己解码
+}
+```
+
+同步这一步两边完全一样：
+
+```js
+const want = videoEl.currentTime - currentMs / 1000;  // 负值 = 音频跑到画面前面
+if (bufferedHas(want)) {
+  if (Math.abs(enhAudio.currentTime - want) > 0.04) enhAudio.currentTime = want;
+} else if (Math.abs(enhAudio.currentTime - want) > 2.5) {
+  enhAudio.currentTime = want;   // 离得远就 seek 过去，让浏览器自己去加载
+}
+```
+
+### 视频在跨域 iframe 里
+
+大量影视站把播放器外包给第三方「解析」接口：
+
+```html
+<iframe src="https://jx.example.com/vip/?url=<加密后的地址>">
+```
+
+`https://m.agedm.io` 就是这种结构——父页面 `document.querySelectorAll('video').length === 0`，真正的 `<video>` 在 iframe 里。所以双向模式的注入必须 `allFrames: true`，否则脚本只进顶层框架，面板挂在一个没有视频的页面上，永远显示「此页不支持双向」。
+
+同时 `content.js` 在初始化时按「本框架里有没有 video」决定要不要显形：父框架保持隐藏，只有真正含 video 的那个 frame 出面版：
+
+```js
+if (document.documentElement.dataset.adsHooked === '1') {
+  hookInstalled = true;
+  if (pickVideo()) api.reveal();   // 没 video 就先藏着，交给轮询等它出现
+  return;
+}
+```
+
+`tabCapture` 的延迟模式不受影响——它抓的是整个标签页的混音，音频从哪层框架出来都一样。
+
 ### 实测数据
 
 在本地 `hls.js` + 公开测试流（MSE，`blob:`）上跑出来的结果，音频电平用 `captureStream + AnalyserNode` 直接量：
@@ -158,7 +219,31 @@ audio.currentTime = video.currentTime − currentMs/1000
 
 `delta = audio − video` 为正表示音频播放位置在画面**之前**，即观众**提前**听到对应内容；为负是延后。滑块语义是「音频延迟量」：负值提前、正值延后，与 hls.js 的 `audioDelay` 一致。
 
-直连路线（原生 HLS，`<video src=".m3u8">` + `<audio src="同一路流">`）：
+真实站点实测（Chrome 155，CDP 驱动滚轮）：
+
+**B 站（MSE 路线，`blob:`，顶层 video）**
+
+| 操作 | `audio − video` |
+|---|---|
+| 启用双向 | −0.063 s（同步，视频已静音） |
+| 滑到 −3000 | **+2.941 s** |
+| 滑到 −5000 | +4.937 s |
+| 拉回 0 | −0.061 s |
+| 退出双向 | 视频恢复出声，audio 销毁 |
+
+**agedm.io（直连路线，视频在跨域 iframe 里）**
+
+| 操作 | `audio − video` |
+|---|---|
+| 启用双向 | −0.060 s |
+| 滑到 −3000 | **+2.920 s** |
+| 滑到 −5000 | +4.953 s |
+| 拉回 0 | −0.065 s |
+| 退出双向 | 恢复出声 |
+
+父框架 `visible: false`、iframe 内 `visible: true` —— 面板只出现在真正有播放器的那一层。
+
+早前在受控页面上跑出的对照组（直连 `<video src=".m3u8">`）：
 
 | 操作 | `audio − video` |
 |---|---|
@@ -174,7 +259,7 @@ audio.currentTime = video.currentTime − currentMs/1000
 
 | 限制                     | 说明                                                                |
 | ---------------------- | ----------------------------------------------------------------- |
-| **只能延后，不能提前**          | 实时流里没有"未来"的音频，物理上做不到。遇到声音比画面晚的片子，只能走离线重编码。                        |
+| **默认模式只能延后**          | 实时流里没有"未来"的音频，`tabCapture` 抓的是已渲染输出，物理上做不到提前。要提前必须切到双向模式（见上）。 |
 | **Chrome / Edge only** | Firefox 没有 `tabCapture`。`getDisplayMedia` 虽然能带音频，但会弹屏幕选择框，体验完全不同。 |
 | **捕获整个标签页**            | 页面里的提示音、广告声会一起被延迟。只处理视频音轨做不到——那需要接管播放器。                           |
 | **一次只能捕获一个标签页**        | 浏览器限制，同一标签页也只能被一路捕获。                                              |

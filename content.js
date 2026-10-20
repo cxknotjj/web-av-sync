@@ -910,6 +910,10 @@
   function startModeWatch() {
     if (modeTimer) return;
     modeTimer = setInterval(function () {
+      /* 有 video 了才显形：跨域 iframe 场景下，父框架会一直等不到 video，
+         面板就保持隐藏；真正有播放器的那个 frame 会在这里显形。 */
+      if (host.style.display === 'none' && pickVideo()) api.reveal();
+
       /* 先重绘再判断要不要停：地址刚出现的那一次，正是需要刷新文案的时候 */
       paintModeUI();
       const k = pageKind();
@@ -1118,7 +1122,11 @@
       }
       if (document.documentElement.dataset.adsHooked === '1') {
         hookInstalled = true;
-        api.reveal();
+        /* 脚本现在注入到所有 iframe，同一个页面会有多个 frame 各跑一份。
+           只有真的含有 video 的那个 frame 才该出面版——父框架通常只有播放器外壳，
+           在那里显示面板会得到一句「此页不支持双向」，纯属误导。
+           没 video 就先藏着，交给轮询等它出现。 */
+        if (pickVideo()) api.reveal();
         updateModeUI();
         return;
       }

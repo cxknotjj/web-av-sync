@@ -302,6 +302,10 @@ async function registerEnhanced(origins) {
     if (old && old.length) await chrome.scripting.unregisterContentScripts({ ids: ENHANCED_IDS });
   } catch (e) {}
 
+  /* allFrames 必须是 true：大量影视站把播放器放在跨域 iframe 里
+     （父页面只有外壳，video 元素在嵌进来的第三方播放器中），
+     只注入顶层框架的话，panel 挂在一个没有 video 的页面上，双向模式永远不可用。
+     多层 iframe 里的面板由 content.js 自行判断要不要显形。 */
   await chrome.scripting.registerContentScripts([
     {
       id: 'ads-main',
@@ -309,14 +313,14 @@ async function registerEnhanced(origins) {
       js: ['inject-main.js'],
       runAt: 'document_start',
       world: 'MAIN',
-      allFrames: false
+      allFrames: true
     },
     {
       id: 'ads-content',
       matches: matches,
       js: ['content.js'],
       runAt: 'document_start',
-      allFrames: false
+      allFrames: true
     }
   ]);
 }
