@@ -1,12 +1,20 @@
 'use strict';
 
-/* 打商店提交包：只放运行时需要的文件，开发脚本和文档不进包。
+/* 打两个包：
  *
  *   node tools/package.js
- *   → dist/audio-delay-sync-1.0.0.zip
+ *
+ *   dist/audio-delay-sync-<ver>.zip         完整版，三条链路都在，自用 / GitHub 分发
+ *   dist/audio-delay-sync-<ver>-store.zip   上架版，砍掉链路②，不带 debugger 权限
+ *
+ * 两个包来自同一份源码，差别只有两处，都由这个脚本在打包时生成：
+ *   1. build-info.js 里 capture: true → false
+ *   2. manifest 去掉 debugger；连同只服务链路② 的 bg-capture.js / mux.min.js
+ *      一起不进包（mux.js 的 Apache 许可文件也就没必要放了）
+ *
+ * 其余代码一个字不动，所以不存在两份分支要同步的问题。
  *
  * zip 用 zlib 手写：不依赖任何 npm 包，Windows 上也能直接跑。
- * 校验和用 Chrome 的 --pack-extension，它会做完整清单检查。
  */
 
 const fs = require('fs');
@@ -21,6 +29,7 @@ const DIST = path.join(ROOT, 'dist');
    商店 zip 就是一份副本。多这一个纯文本文件不影响审核。 */
 const INCLUDE = [
   'manifest.json',
+  'build-info.js',
   'background.js',
   'bg-capture.js',
   'bg-auth.js',
@@ -42,6 +51,10 @@ const INCLUDE = [
   'LICENSE-APACHE-2.0.txt',
   'THIRD_PARTY_NOTICES.md'
 ];
+
+/* 上架版砍掉的四个文件。前两个只服务链路②（debugger 抓 ts 切片），
+   后两个是 mux.js 的许可文件 —— mux 都不进包了，许可声明也就无从依附。 */
+const STORE_DROP = ['bg-capture.js', 'mux.min.js', 'LICENSE-APACHE-2.0.txt', 'THIRD_PARTY_NOTICES.md'];
 
 /* ---------------- zip ---------------- */
 
@@ -131,9 +144,32 @@ function buildZip(files) {
   return Buffer.concat([...locals, centralBuf, end]);
 }
 
+/* ---------------- 构建变体 ---------------- */
+
+/** 改 build-info.js 里那唯一一行标记。找不到就报错 —— 说明有人改了格式，
+ *  这时候静默放过去会打出一个「自称上架版、实际带 debugger」的包。 */
+function buildInfoFor(store) {
+  const src = fs.readFileSync(path.join(ROOT, 'build-info.js'), 'utf8');
+  if (!store) return Buffer.from(src);
+
+  const next = src.replace(
+    'globalThis.ADS_BUILD = { capture: true };',
+    'globalThis.ADS_BUILD = { capture: false };'
+  );
+  if (next === src) throw new Error('build-info.js 里没找到构建标记行，无法生成上架版');
+  return Buffer.from(next);
+}
+
+/** 上架版的清单：删掉 debugger，其余原样 */
+function storeManifest(mf) {
+  const copy = JSON.parse(JSON.stringify(mf));
+  copy.permissions = (copy.permissions || []).filter(p => p !== 'debugger');
+  return copy;
+}
+
 /* ---------------- 检查 ---------------- */
 
-function assertManifest(mf) {
+function assertManifest(mf, entries) {
   const problems = [];
 
   if (mf.manifest_version !== 3) problems.push('manifest_version 必须是 3');
@@ -155,8 +191,8 @@ function assertManifest(mf) {
 
   /* 商店审核最看重的：权限必须是实际用到的 */
   const used = new Set();
-  const src = INCLUDE.filter(f => f.endsWith('.js'))
-    .map(f => fs.readFileSync(path.join(ROOT, f), 'utf8'))
+  const src = entries.filter(e => e.name.endsWith('.js'))
+    .map(e => e.data.toString('utf8'))
     .join('\n');
   const apiToPerm = {
     'chrome.tabCapture': 'tabCapture',
@@ -192,29 +228,67 @@ function assertManifest(mf) {
 
 /* ---------------- 主流程 ---------------- */
 
-const mf = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+const baseManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+const VERSION = baseManifest.version;
 
-const problems = assertManifest(mf);
-if (problems.length) {
-  console.error('清单检查未通过：');
-  for (const p of problems) console.error('  ✗ ' + p);
-  process.exit(1);
-}
-
-const files = INCLUDE.map(name => {
-  const full = path.join(ROOT, name);
-  if (!fs.existsSync(full)) {
-    console.error('缺少文件：' + name);
-    process.exit(1);
+const TARGETS = [
+  {
+    key: 'full',
+    label: '完整版 三条链路',
+    store: false,
+    include: INCLUDE,
+    manifest: baseManifest,
+    out: `audio-delay-sync-${VERSION}.zip`
+  },
+  {
+    key: 'store',
+    label: '上架版 无 debugger',
+    store: true,
+    include: INCLUDE.filter(f => !STORE_DROP.includes(f)),
+    manifest: storeManifest(baseManifest),
+    out: `audio-delay-sync-${VERSION}-store.zip`
   }
-  return { name, data: fs.readFileSync(full) };
-});
+];
 
 fs.mkdirSync(DIST, { recursive: true });
-const out = path.join(DIST, `audio-delay-sync-${mf.version}.zip`);
-fs.writeFileSync(out, buildZip(files));
 
-const kb = (fs.statSync(out).size / 1024).toFixed(1);
-console.log(`✓ 清单检查通过（${mf.permissions.length} 项权限全部有代码依据）`);
-console.log(`✓ 打包 ${files.length} 个文件，共 ${kb} KB`);
-console.log('  ' + out);
+for (const t of TARGETS) {
+  const entries = t.include.map(name => {
+    const full = path.join(ROOT, name);
+    if (!fs.existsSync(full)) {
+      console.error(`[${t.key}] 缺少文件：` + name);
+      process.exit(1);
+    }
+    if (name === 'build-info.js') return { name, data: buildInfoFor(t.store) };
+    if (name === 'manifest.json') {
+      return { name, data: Buffer.from(JSON.stringify(t.manifest, null, 2) + '\n', 'utf8') };
+    }
+    return { name, data: fs.readFileSync(full) };
+  });
+
+  const problems = assertManifest(t.manifest, entries);
+  if (problems.length) {
+    console.error(`[${t.key}] 清单检查未通过：`);
+    for (const p of problems) console.error('  ✗ ' + p);
+    process.exit(1);
+  }
+
+  /* 上架版额外两道闸：包里不能残留调试协议调用，也不能把 mux 漏进来 */
+  if (t.store) {
+    const dirty = entries.filter(e => e.name.endsWith('.js') && e.data.includes('chrome.debugger'));
+    if (dirty.length) {
+      console.error(`[${t.key}] 上架包里仍有 debugger 调用：` + dirty.map(e => e.name).join(', '));
+      process.exit(1);
+    }
+    if (entries.some(e => e.name === 'mux.min.js')) {
+      console.error(`[${t.key}] 上架包里不该有 mux.min.js`);
+      process.exit(1);
+    }
+  }
+
+  const out = path.join(DIST, t.out);
+  fs.writeFileSync(out, buildZip(entries));
+  const kb = (fs.statSync(out).size / 1024).toFixed(1);
+  console.log(`✓ ${t.label}　${entries.length} 个文件　${kb} KB　${t.manifest.permissions.length} 项权限`);
+  console.log('  ' + out);
+}

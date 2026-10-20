@@ -9,6 +9,15 @@
  * ================================================================ */
 const ENHANCED_IDS = ['ads-main', 'ads-content'];
 
+/** 内容脚本的注入顺序。build-info.js 必须第一个：后面几个都要读 ADS_BUILD。
+ *  mux.min.js 只服务链路②，上架版整个文件不进包，这里也就不能列它的名字 ——
+ *  registerContentScripts 遇到不存在的文件会整条抛错，结果是面板根本不注入。 */
+function contentScriptFiles() {
+  const files = ['build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-enhance.js'];
+  if (!(globalThis.ADS_BUILD && globalThis.ADS_BUILD.capture === false)) files.push('mux.min.js');
+  return files.concat(['content.js']);
+}
+
 async function registerEnhanced(origins) {
   const matches = (origins || [])
     .map(function (o) { return String(o).replace(/\/\*$/, '') + '/*'; })
@@ -39,9 +48,9 @@ async function registerEnhanced(origins) {
     {
       id: 'ads-content',
       matches: matches,
-      /* 顺序有讲究：样式常量 → 面板 → 双向 → mux.js → 入口。
+      /* 顺序有讲究：构建标记 → 样式常量 → 面板 → 双向 →（可选）mux.js → 入口。
          入口最后跑，前面几个都挂到 window.ADS 上。 */
-      js: ['ads-template.js', 'ads-ui.js', 'ads-enhance.js', 'mux.min.js', 'content.js'],
+      js: contentScriptFiles(),
       runAt: 'document_start',
       allFrames: true
     }

@@ -120,6 +120,8 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 
 ### 链路②：调试协议抓切片（原生 HLS）
 
+> **这一条只在完整版里存在。** 它需要 `debugger` 权限，而该权限既不能在安装时隐藏，也不能改成可选（Chromium 明确把 `debugger` 排除在 `optional_permissions` 之外），安装弹窗上会多出「访问网页调试后端」和「读取并更改所有网站上的所有数据」两条警告。上架版为避开这两条警告把整条链路裁掉，原生 HLS 站点退回链路③。
+
 原生 HLS 由浏览器内置 demuxer 处理，ts 字节全程不经过 JS——没有 `MediaSource`、没有 `appendBuffer`，hook 无处可挂。但调试协议能看到这批字节：
 
 ```js
@@ -326,20 +328,21 @@ if (document.documentElement.dataset.adsHooked === '1') {
 
 ```
 manifest.json      MV3 清单
+build-info.js      构建标记，只有一行：完整版 capture:true / 上架版 capture:false
 background.js      service worker 入口：点图标接管、管理 offscreen、消息路由
 bg-auth.js         站点授权与增强脚本注册（permissions.request 的手势约束都在这）
-bg-capture.js      原生 HLS 抓切片：chrome.debugger + Network.getResponseBody
+bg-capture.js      原生 HLS 抓切片：chrome.debugger + Network.getResponseBody（仅完整版）
 offscreen.html/js  音频处理：getUserMedia → DelayNode → destination
 ads-template.js    面板与提示的样式、结构模板（纯字符串，不碰 DOM）
 ads-ui.js          面板、提示条、滑块/滚轮/键盘/拖动/全屏跟随 → window.ADS.ui
 ads-enhance.js     双向模式三条链路 + 同步循环 → window.ADS.enh
 content.js         内容脚本入口：消息路由、初始化
 inject-main.js     MAIN world：劫持 appendBuffer，复制音频片段给双向模式用
-mux.min.js         原生 HLS 那条链路用来把 ts 转成 fMP4（Apache-2.0）
+mux.min.js         原生 HLS 那条链路用来把 ts 转成 fMP4（Apache-2.0，仅完整版）
 icons/             16 / 32 / 48 / 128 四档图标（make-icons.js 生成）
 tools/             图标生成、商店素材生成、打包校验、CDP 加载脚本
 store/             商店提交材料：文案、截图、隐私政策
-dist/              打好的提交包（package.js 产出）
+dist/              打好的提交包（package.js 产出，完整版与上架版各一份）
 ```
 
 后台两个模块用 `importScripts` 挂进 SW，和 `background.js` 共用同一个全局环境；
@@ -395,11 +398,43 @@ python tools/make-store-assets.py                     # store/ 下的截图、�
 
 > 商店素材脚本用 PIL 渲染真实字体（`pip install pillow`），中文标注不用手写点阵。
 
-打商店提交包：
+打提交包（一次出两个，见下节）：
 
 ```bash
-node tools/package.js         # → dist/audio-delay-sync-<version>.zip
+node tools/package.js
+# → dist/audio-delay-sync-<version>.zip         完整版
+# → dist/audio-delay-sync-<version>-store.zip   上架版
 ```
+
+### 两个构建：完整版与上架版
+
+差别只有链路② 一条，理由是 `debugger` 权限要付的代价：
+
+| | 完整版 | 上架版 |
+|---|---|---|
+| 链路 | ① ② ③ | ① ③ |
+| `debugger` 权限 | 有 | **无**（5 项权限） |
+| 安装时警告 | 多两条（调试后端 + 全站数据） | 只有常规几项 |
+| 打包体积 | 227 KB | 95 KB（不含 mux.js） |
+| 适用 | 自用、GitHub 直接发 | Edge 加载项商店 |
+
+**只有一份源码。** 分支开关是 `build-info.js` 里的这一行：
+
+```js
+globalThis.ADS_BUILD = { capture: true };   // 打包时由 package.js 改成 false
+```
+
+`package.js` 对上架版做四件事，其余代码一个字不动：改这一行、从 manifest 删掉 `debugger`、把 `bg-capture.js` 和 `mux.min.js` 剔出包、连带去掉 mux.js 的 Apache 许可文件。
+
+代码里读这个标记的地方只有三处，都很短：
+
+- `ads-enhance.js` 的 `captureEnabled()` —— `pickRoute()` 里 `capture` 那条判断前面加它，面板按钮文案也跟着切
+- `background.js` —— `importScripts('bg-capture.js')` 只在 `capture !== false` 时执行；消息路由给 `captureStart/captureStop` 加了 `typeof` 兜底，避免上架版里调用不存在的函数
+- `bg-auth.js` 的 `contentScriptFiles()` —— `mux.min.js` 按标记决定要不要列进注册表，**漏了这一步整条注册会抛错，结果是面板根本不注入**
+
+`package.js` 对上架版额外做两道闸：包内任何 `.js` 出现 `chrome.debugger` 就失败；`mux.min.js` 出现在清单里也失败。所以「忘了改标记」不可能静默打出一个自称上架、实际带调试权限的包。
+
+两个包用同一个版本号，不要同时装进同一个浏览器 —— 扩展 ID 不同，会被当成两个扩展。
 
 跑点击行为测试（把 `chrome.*` 全 mock 掉，验证状态机）：
 
@@ -421,7 +456,9 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 
 注册免费（Partner Center → Edge 计划），审核通常 3\~7 个工作日。
 
-同一个 zip 直接复用，Edge 基于 Chromium，`chrome.*` API 与 manifest 完全一致。要改的只有商店侧的信息：
+**上传的是上架版：`dist/audio-delay-sync-<version>-store.zip`**，不是完整版。它没有 `debugger` 权限，安装警告少两条，体积也小一半。完整版留给自用和 GitHub 分发。
+
+同一个 zip 也能直接投 Chrome 商店（`chrome.*` API 与 manifest 在两边完全一致），要改的只有商店侧的信息：
 
 | 项            | 说明                                      |
 | ------------ | --------------------------------------- |

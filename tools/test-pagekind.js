@@ -96,5 +96,33 @@ console.log('\n[7] 实时媒体流，不是 MSE');
 console.log('\n[8] 边界：浏览器连 MediaSource 都没有');
 check('blob 仍判 mse', run(fakeVideo({ currentSrc: 'blob:https://a.com/x' }), null), 'mse');
 
+/* ---- 构建标记：上架版没有链路② ---- */
+
+const PICK_ROUTE = extract('pickRoute');
+const CAPTURE_ENABLED = extract('captureEnabled');
+
+/** hookReady / chunks / muxjs 在真身里是闭包变量，这里作为全局注入即可 */
+function runRoute(kindName, build, hook, chunkCount) {
+  const ctx = vm.createContext({
+    hookReady: !!hook,
+    chunks: new Array(chunkCount || 0),
+    muxjs: {}
+  });
+  vm.runInContext(CAPTURE_ENABLED + '\n' + PICK_ROUTE + '\nthis.pickRoute = pickRoute;', ctx);
+  ctx.ADS_BUILD = build;
+  return ctx.pickRoute(kindName);
+}
+
+console.log('\n[9] 链路选择：完整版三条都在');
+check('hls + 有 mux', runRoute('hls', undefined), 'capture');
+check('direct', runRoute('direct', undefined), 'src');
+check('mse 已截到片段', runRoute('mse', undefined, true, 3), 'mse');
+check('stream 不支持', runRoute('stream', undefined), '');
+
+console.log('\n[10] 链路选择：上架版没有链路②');
+check('hls 不走 capture', runRoute('hls', { capture: false }), 'src');
+check('即使 mse 片段在手也优先复用', runRoute('mse', { capture: false }, true, 3), 'mse');
+check('direct 不变', runRoute('direct', { capture: false }), 'src');
+
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');
 process.exit(failures === 0 ? 0 : 1);

@@ -117,9 +117,29 @@
 
   /** 这次会走哪条链路。面板预告和真正分派共用这一份判断，
    *  否则两边各写一套，早晚会说「预告走 ①」然后实际跑 ③。 */
+  /* ---------------- 构建能力 ------------- */
+
+  /** 这个包里有没有链路②。上架版没有 debugger 权限，也就没有这条链路：
+   *  tools/package.js 只改 build-info.js 里的一行，其余代码原样保留。
+   *  读不到标记时按完整版处理 —— 开发时直接 load-unpacked 也能用 ②。 */
+  function captureEnabled() {
+    const b = globalThis.ADS_BUILD;
+    return !(b && b.capture === false);
+  }
+
+  /* 面板上的编号按「这个包里实际存在的链路」连续编号。
+     上架版没有 ②，否则用户会看到 ① 和 ③ 中间空一个，以为少了东西。 */
+  const ROUTE_ORDER = ['mse', 'capture', 'src'];
+  const ROUTE_IDS = ['①', '②', '③'];
+  function routeId(key) {
+    const list = ROUTE_ORDER.filter(function (k) { return k !== 'capture' || captureEnabled(); });
+    const i = list.indexOf(key);
+    return i < 0 ? '' : ROUTE_IDS[i];
+  }
+
   function pickRoute(kind) {
     if (hookReady && chunks.length) return 'mse';
-    if (kind === 'hls' && typeof muxjs !== 'undefined') return 'capture';
+    if (captureEnabled() && kind === 'hls' && typeof muxjs !== 'undefined') return 'capture';
     if (kind === 'hls' || kind === 'direct') return 'src';
     return '';
   }
@@ -435,7 +455,8 @@
       return;
     }
 
-    const route = pickRoute(pageKind());
+    const kind = pageKind();
+    const route = pickRoute(kind);
     routeWhy = '';   /* 每轮重新判断，别把上一轮的降级原因带过来 */
 
     /* ① 页面自己在用 MSE（hls.js / shaka），切片已经躺在 appendBuffer 里了 */
@@ -512,7 +533,7 @@
     if (!r) { ui.setRoute(null); return; }
 
     ui.setRoute({
-      id: r.id,
+      id: routeId(enhMode || pickRoute(pageKind())),
       /* 「将用」是给还没点的用户看的，分清预告和生效 */
       name: enhMode ? r.name : '将用 ' + r.name,
       /* 链路选定了但还没出声（在等数据、等降级），别让用户以为已经生效 */
@@ -546,6 +567,7 @@
       const v = pickVideo();
       document.documentElement.dataset.adsState = JSON.stringify({
         kind: pageKind(),
+        capture: captureEnabled(),
         mux: typeof muxjs !== 'undefined',
         hookInstalled: hookInstalled,
         hookReady: hookReady,
@@ -580,7 +602,7 @@
     const kind = pageKind();
 
     if (kind === 'hls') {
-      ui.setModeBtn('启用双向', (typeof muxjs !== 'undefined')
+      ui.setModeBtn('启用双向', (captureEnabled() && typeof muxjs !== 'undefined')
         ? '原生 HLS：先用调试协议取回播放器已下载的切片，不额外耗流量（浏览器顶部会提示正在调试）；取不到时自动改为重新拉一路'
         : '原生 HLS：用同一条流再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量', false);
       return;

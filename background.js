@@ -9,8 +9,9 @@
 
 const OFFSCREEN_URL = 'offscreen.html';
 /** 面板 + 双向逻辑拆成了几个文件，重新注入时要一起给，
- *  只给 content.js 会因为它找不到 ADS 直接 return。 */
-const CONTENT_SCRIPTS = ['ads-template.js', 'ads-ui.js', 'ads-enhance.js', 'content.js'];
+ *  只给 content.js 会因为它找不到 ADS 直接 return。
+ *  build-info.js 必须排第一：后面的文件要读它上面的 ADS_BUILD 标记。 */
+const CONTENT_SCRIPTS = ['build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-enhance.js', 'content.js'];
 const LAST_DELAY_KEY = 'lastDelayMs';
 
 let creatingOffscreen = null;
@@ -288,8 +289,17 @@ async function flashBadge(tabId) {
  * 任何网站权限，用户主动启用时才按站点授权。
  */
 
-/* 拆出去的两块，importScripts 让它们和本文件共享同一个全局环境 */
-importScripts('bg-capture.js', 'bg-auth.js');
+/* 拆出去的两块，importScripts 让它们和本文件共享同一个全局环境。
+   build-info.js 必须最先加载，后面两块和消息路由都要读它的标记。 */
+importScripts('build-info.js', 'bg-auth.js');
+
+/* 上架版把链路② 整条裁掉了：包里没有 bg-capture.js，manifest 也没有
+   debugger 权限，所以这个文件不能引 —— 引了会直接抛，整个 SW 起不来。 */
+const CAPTURE_BUILD = !(globalThis.ADS_BUILD && globalThis.ADS_BUILD.capture === false);
+if (CAPTURE_BUILD) importScripts('bg-capture.js');
+
+/** 抓切片不可用时的统一回复（只有上架版会用到） */
+const NO_CAPTURE = { ok: false, error: 'no-capture' };
 /* ---------------- 消息路由 ---------------- */
 
 function sendToTab(tabId, msg) {
@@ -364,9 +374,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       registerOnly(msg.origin, sender && sender.tab && sender.tab.id).then(sendResponse);
       return true;
     case 'captureStart':
+      /* 上架版没有抓切片模块。正常也走不到这里（内容脚本的 pickRoute 会先
+         把 ② 排除掉），真走到了就明确回失败，别让调用方等到超时。 */
+      if (typeof captureAttach !== 'function') { sendResponse(NO_CAPTURE); return false; }
       captureAttach(sender && sender.tab && sender.tab.id, sender && sender.frameId).then(sendResponse);
       return true;
     case 'captureStop':
+      if (typeof captureDetach !== 'function') { sendResponse(NO_CAPTURE); return false; }
       captureDetach(msg.tabId || (sender && sender.tab && sender.tab.id)).then(sendResponse);
       return true;
     default:
