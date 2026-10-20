@@ -71,6 +71,9 @@
 
   /* 当前走的哪条链路，决定退出时要做哪些清理 */
   let enhMode = '';
+  /* 为什么落到这条链路。用户看到 ③ 却不知道为什么没用更省的那条时，
+     这个字符串就是答案，会拼进指示条的悬停提示。 */
+  let routeWhy = '';
   let enhGuard = null;        /* 试运行超时计时器，非 null 表示还在「未落定」阶段 */
   let capInitDone = false;    /* 调试通道下，init segment 只需 append 一次 */
   let capBytes = 0;           /* 已经解出多少音频字节，用来判断「真有数据了」 */
@@ -316,9 +319,15 @@
     capBytes = 0;
     paintRoute();
 
+    let fellBack = false;
     const fallback = function () {
+      if (fellBack) return;
+      fellBack = true;
       const keep = videoEl;
+      /* 降级要留痕：不弹一次提示的话，用户只会看到流量翻倍却不知道为什么 */
+      routeWhy = '抓切片失败（调试器被占用，或页面上没有新的切片请求），已自动降级';
       enhFail(null, function () { if (keep) startViaSrc(keep); });
+      if (ui) ui.showToast('没抓到切片，已改为重新拉一路（约多一倍流量）');
     };
 
     enhAudio = document.createElement('audio');
@@ -427,6 +436,7 @@
     }
 
     const route = pickRoute(pageKind());
+    routeWhy = '';   /* 每轮重新判断，别把上一轮的降级原因带过来 */
 
     /* ① 页面自己在用 MSE（hls.js / shaka），切片已经躺在 appendBuffer 里了 */
     if (route === 'mse') { startMseReuse(v); return; }
@@ -435,7 +445,14 @@
     if (route === 'capture') { startNativeCapture(v); return; }
 
     /* ③ 直连媒体：自己再拉一路 */
-    if (route === 'src') { startViaSrc(v); return; }
+    if (route === 'src') {
+      /* 记下为什么没走更省的链路 —— 这两种情况代价差一倍，用户有权知道 */
+      routeWhy = kind === 'direct'
+        ? '页面是直连媒体（.mp4 / 非 m3u8），没有切片可抓，只能重新拉一路'
+        : '有 m3u8 但取不到切片数据';
+      startViaSrc(v);
+      return;
+    }
 
     if (ui) {
       ui.showToast(hookReady
@@ -453,6 +470,7 @@
     }
 
     enhMode = '';
+    routeWhy = '';
 
     if (enhAudio) {
       try { enhAudio.pause(); } catch (e) {}
@@ -499,11 +517,13 @@
       name: enhMode ? r.name : '将用 ' + r.name,
       /* 链路选定了但还没出声（在等数据、等降级），别让用户以为已经生效 */
       meta: enhMode && !enhanced ? '连接中…' : r.meta,
-      hint: r.hint,
+      hint: (enhMode === 'src' && routeWhy) ? r.hint + ' ｜ 原因：' + routeWhy : r.hint,
       on: enhanced
     });
 
     if (enhanced) paintRouteMeta();
+    /* 链路一选定就发布状态，别等下一次整轮重绘 */
+    publishState();
   }
 
   /** 右侧那截动态数字：音频已经缓冲到画面之后多少秒，也就是最多还能提前多少。
@@ -518,12 +538,34 @@
     ui.setRouteMeta(r.meta + ' · 可提前 ' + ahead.toFixed(1) + 's');
   }
 
+  /** 把内部判断结果写到 DOM 属性上。
+   *  内容脚本跑在隔离世界，主世界的 Console 读不到 window.ADS，
+   *  所以排查只能靠 DOM 这个公共面。用户按 F12 敲一行就能看到全部状态。 */
+  function publishState() {
+    try {
+      const v = pickVideo();
+      document.documentElement.dataset.adsState = JSON.stringify({
+        kind: pageKind(),
+        mux: typeof muxjs !== 'undefined',
+        hookInstalled: hookInstalled,
+        hookReady: hookReady,
+        chunks: chunks.length,
+        enhanced: enhanced,
+        mode: enhMode,
+        why: routeWhy,
+        videoSrc: v ? String(v.currentSrc || v.src || '').slice(0, 80) : null,
+        videoPaused: v ? v.paused : null
+      });
+    } catch (e) {}
+  }
+
   function paintModeUI() {
     if (!ui) return;
 
     ui.setTip(enhanced ? '负值让声音提前 · 滚轮可调' : '只延后声音 · 滚轮可调');
     ui.setModeTag(enhanced ? '双向' : '延迟', enhanced);
     paintRoute();
+    publishState();
 
     if (enhanced) {
       ui.setModeBtn('', '', true);
