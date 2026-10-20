@@ -87,6 +87,7 @@ function makeEnv(opts) {
     },
     tabs: {
       sendMessage: async (id, msg) => { log.push('tab:' + id + ':' + (msg && msg.type)); },
+      reload: async (id) => { log.push('reload:' + id); },
       onRemoved: { addListener: (fn) => { env.onRemoved = fn; } },
       onUpdated: { addListener: (fn) => { env.onUpdated = fn; } }
     },

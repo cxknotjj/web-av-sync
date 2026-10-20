@@ -131,6 +131,9 @@
      两者必须分开 —— 原生 HLS 页面 hook 装得上，但永远截不到东西。 */
   let hookInstalled = false;
   let hookReady = false;
+  /* 站点是否已授权。和「脚本有没有注入」是两件事：
+     授权了但页面在注册完成前就加载，脚本仍然进不来。 */
+  let permGranted = false;
   let audioMime = '';
   const chunks = [];
   let chunkBytes = 0;
@@ -858,8 +861,13 @@
     }
 
     if (!hookInstalled) {
-      modeBtn.textContent = '双向需授权';
-      modeBtn.title = '需要当前站点的访问权限，授权后刷新一次页面';
+      if (permGranted) {
+        modeBtn.textContent = '刷新页面生效';
+        modeBtn.title = '这个站点已经授权，但当前页面加载时脚本还没注册上。刷新一次即可';
+      } else {
+        modeBtn.textContent = '双向需授权';
+        modeBtn.title = '需要当前站点的访问权限，点一下会弹出授权框';
+      }
       return;
     }
 
@@ -885,6 +893,26 @@
       return;
     }
 
+    /* 已经授权过，只是当前页面没赶上注册：走只注册通道，不要再要一次权限。
+       permissions.request 即使权限已存在也要求手势，没必要为它多绕一圈。 */
+    if (permGranted) {
+      try {
+        const res = await chrome.runtime.sendMessage({
+          target: 'sw',
+          type: 'registerOnly',
+          origin: location.origin
+        });
+        if (res && res.ok) {
+          showToast('已重新注册，正在刷新页面…', 'ok');
+        } else {
+          showToast((res && res.error) || '注册失败');
+        }
+      } catch (e) {
+        showToast('注册请求失败：' + ((e && e.message) || e));
+      }
+      return;
+    }
+
     /* 还没 hook：先问 background 要站点权限，授权后刷新页面才生效 */
     try {
       const res = await chrome.runtime.sendMessage({
@@ -893,7 +921,7 @@
         origin: location.origin
       });
       if (res && res.ok) {
-        showToast('已授权。刷新一次页面，之后就能用双向模式（可提前声音）。', 'ok');
+        showToast('已授权，正在刷新页面…', 'ok');
       } else {
         /* needGesture 时 error 里已经写清下一步该点哪里，直接展示 */
         showToast((res && res.error) || '授权失败');
@@ -991,6 +1019,14 @@
         return;
       }
       destroy();
+    })
+    .catch(function () {});
+
+  /* 这个站点到底授权没有：决定按钮显示「双向需授权」还是「刷新页面生效」 */
+  chrome.runtime.sendMessage({ target: 'sw', type: 'checkOrigin', origin: location.origin })
+    .then(function (r) {
+      permGranted = !!(r && r.granted);
+      updateModeUI();
     })
     .catch(function () {});
 })();
