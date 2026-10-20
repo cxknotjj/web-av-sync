@@ -654,16 +654,46 @@
     return best || document.querySelector('video');
   }
 
-  /** 页面是不是 MSE 播放器（blob: 地址）。
-   *  原生 HLS / 直连 mp4 的音频数据不经过 JS，双向模式无从复用。 */
-  function pageIsMSE() {
+  /** 页面的播放方式。双向模式只认 mse，其余都无从复用音频片段。
+   *  区分 hls / direct 是为了给准原因 —— 两者都是「用不了」，但为什么用不了不一样。 */
+  function pageKind() {
     const v = pickVideo();
-    if (!v) return false;
-    /* 少数播放器直接把 MediaSource 挂到 srcObject 上，地址栏里看不到 blob: */
+    if (!v) return 'none';
+
+    /* 少数播放器把 MediaSource 挂到 srcObject，地址栏里看不到 blob: */
     try {
-      if (v.srcObject && typeof MediaSource !== 'undefined' && v.srcObject instanceof MediaSource) return true;
+      if (v.srcObject) {
+        if (typeof MediaSource !== 'undefined' && v.srcObject instanceof MediaSource) return 'mse';
+        return 'stream';   /* MediaStream：captureStream / WebRTC，同样没有 appendBuffer */
+      }
     } catch (e) {}
-    return String(v.currentSrc || v.src || '').indexOf('blob:') === 0;
+
+    const src = String(v.currentSrc || v.src || '');
+    /* 还没开始加载时两个字段都是空的，此时既不是 MSE 也不是原生 HLS，不能乱下结论 */
+    if (!src) return 'unknown';
+    if (src.indexOf('blob:') === 0) return 'mse';
+    if (/m3u8/i.test(src)) return 'hls';
+    return 'direct';
+  }
+
+  function pageIsMSE() {
+    return pageKind() === 'mse';
+  }
+
+  /** 为什么用不了双向模式。按播放方式给具体原因，而不是一律说「不支持」。 */
+  function whyNoEnhanced() {
+    switch (pageKind()) {
+      case 'none':
+        return '这个页面没有找到视频元素。';
+      case 'unknown':
+        return '视频还没开始加载。先点一下播放，播几秒再试。';
+      case 'stream':
+        return '这个页面播的是实时媒体流（MediaStream），音频不经过 MSE，双向模式用不了。延迟模式仍可用。';
+      case 'hls':
+        return '视频地址是 .m3u8 直连（原生 HLS），数据在浏览器内部，JS 拿不到。双向模式用不了，延迟模式仍可用。';
+      default:
+        return '视频是整段文件直连，音频数据不经过 MSE，双向模式用不了。延迟模式仍可用。';
+    }
   }
 
   function pushChunk(buf) {
@@ -732,7 +762,7 @@
     if (!hookReady) {
       showToast(pageIsMSE()
         ? '还没截到音频轨，先让视频播放几秒再点。'
-        : '这个页面的视频是直连地址，音频不经过 JS，双向模式用不了。');
+        : whyNoEnhanced());
       return;
     }
 
@@ -872,12 +902,18 @@
     }
 
     /* 脚本装上了却没截到音频轨：要么还没开始播，要么根本不是 MSE */
-    if (!pageIsMSE()) {
-      modeBtn.textContent = '此页不支持双向';
-      modeBtn.title = '视频地址是直连的（原生 HLS 或 mp4），音频数据不经过 JS，无法复用';
-    } else {
+    const kind = pageKind();
+    if (kind === 'mse') {
       modeBtn.textContent = '等待音频轨';
       modeBtn.title = '播放器还没往 MSE 里写音频，先让视频播放几秒';
+    } else if (kind === 'unknown') {
+      modeBtn.textContent = '等待播放';
+      modeBtn.title = '视频还没开始加载，先点一下播放';
+    } else {
+      modeBtn.textContent = '此页不支持双向';
+      modeBtn.title = kind === 'hls'
+        ? '视频地址是 .m3u8 直连（原生 HLS），数据不经过 JS'
+        : '视频是直连的，音频数据不经过 MSE';
     }
   }
 
@@ -889,7 +925,7 @@
     if (hookInstalled) {
       showToast(pageIsMSE()
         ? '还没截到音频轨，先让视频播放几秒再点。'
-        : '这个页面的视频是直连地址（原生 HLS），音频不经过 JS，双向模式用不了。延迟模式仍然可用。');
+        : whyNoEnhanced());
       return;
     }
 

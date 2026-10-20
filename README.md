@@ -131,6 +131,67 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 | 误差几十毫秒 | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20~70ms |
 | 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音 |
 
+### 怎么判断这个页面能不能用双向模式
+
+打开 DevTools Console，先看这一行：
+
+```js
+document.querySelector('video').currentSrc
+```
+
+| 返回 | 播放方式 | 双向模式 |
+|---|---|---|
+| `blob:` 开头 | MSE（hls.js / dash.js） | 可用 |
+| `.m3u8` 结尾 | 原生 HLS（Chrome 142+ 内置解码） | 不可用 |
+| `.mp4` 等其他 | 整段文件直连 | 不可用 |
+
+页面有多个 `<video>`（广告、预告、背景）时，上面这行可能抓错。用这段一次看全：
+
+```js
+(() => {
+  const vids = [...document.querySelectorAll('video')];
+  if (!vids.length) return '这个框架里没有 video，切到 iframe 上下文再试';
+  console.table(vids.map((v, i) => {
+    const src = v.currentSrc || v.src || '';
+    let kind = '无源';
+    try {
+      if (v.srcObject instanceof MediaSource) kind = 'MSE（srcObject）';
+      else if (src.startsWith('blob:')) kind = 'MSE（blob）';
+      else if (/m3u8/i.test(src)) kind = '原生 HLS';
+      else if (src) kind = '普通地址';
+    } catch (e) {}
+    return {
+      序号: i,
+      尺寸: (v.clientWidth || 0) + '×' + (v.clientHeight || 0),
+      正在播: !v.paused && !v.ended,
+      判断: kind,
+      地址: src.slice(0, 80)
+    };
+  }));
+  return '看「正在播 = true」且尺寸最大的那一行';
+})();
+```
+
+`blob:` 只是间接证据。**唯一的充分条件是 `appendBuffer` 真的被调用过**——双向模式复用的就是这一步的数据。不确定的话，在页面加载前装个探针再刷新：
+
+```js
+const _add = MediaSource.prototype.addSourceBuffer;
+MediaSource.prototype.addSourceBuffer = function (m) {
+  console.log('[探针] addSourceBuffer →', m);
+  return _add.call(this, m);
+};
+```
+
+打印出 `audio/mp4; codecs=...` 就说明能用。一条都没有，即使地址是 `blob:` 也只能延后。
+
+三个容易误判的地方：
+
+- **多个 video**：按尺寸取最大，而不是 `querySelector` 的第一个
+- **在 iframe 里**：Console 默认只查顶层文档，要把执行上下文从 `top` 切到对应 iframe
+- **还没开始播放**：`currentSrc` 和 `src` 都是空的，此时既不是 MSE 也不是原生 HLS，别急着下结论
+
+面板内部按 `pageKind()` 分六种情况给不同提示：`none` / `unknown` / `mse` / `hls` / `direct` / `stream`。「等待播放」和「此页不支持双向」是两件事，前者再等几秒就好。
+
 ### 实测数据
 
 在本地 `hls.js` + 公开测试流（MSE，`blob:`）上跑出来的结果，音频电平用 `captureStream + AnalyserNode` 直接量：
@@ -215,6 +276,7 @@ node tools/package.js         # → dist/audio-delay-sync-<version>.zip
 ```bash
 node tools/test-toggle.js    # 点图标的状态机
 node tools/test-inject.js    # appendBuffer 劫持与数据复制
+node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 未知）
 ```
 
 > 覆盖：首点接管、再点停止、换标签页先拆旧的、捕获被拒要提示且不留残留状态、页面不允许注入时退回图标角标、延迟值落盘、标签页关闭自动收尾。
