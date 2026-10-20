@@ -5,7 +5,7 @@
  * 这个函数决定面板给用户看哪句话：「等待播放」「等待音频轨」「此页不支持双向」。
  * 判错会让人以为站点不支持，而实际只是还没加载 —— 所以六个分支逐个核对。
  *
- * 直接从 content.js 里抽出函数体来跑，不复制逻辑，避免测的和跑的不是同一份。
+ * 直接从 ads-enhance.js 里抽出函数体来跑，不复制逻辑，避免测的和跑的不是同一份。
  */
 
 const fs = require('fs');
@@ -13,7 +13,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const SRC = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+const SRC = fs.readFileSync(path.join(ROOT, 'ads-enhance.js'), 'utf8');
 
 /** 从源码里按函数名截出完整定义（按花括号配平，不依赖缩进） */
 function extract(name) {

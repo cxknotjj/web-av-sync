@@ -22,10 +22,16 @@ const DIST = path.join(ROOT, 'dist');
 const INCLUDE = [
   'manifest.json',
   'background.js',
+  'bg-capture.js',
+  'bg-auth.js',
   'offscreen.html',
   'offscreen.js',
+  'ads-template.js',
+  'ads-ui.js',
+  'ads-enhance.js',
   'content.js',
   'inject-main.js',
+  'mux.min.js',
   'icons/icon16.png',
   'icons/icon32.png',
   'icons/icon48.png',
@@ -153,6 +159,8 @@ function assertManifest(mf) {
     'chrome.offscreen': 'offscreen',
     'chrome.scripting': 'scripting',
     'chrome.storage': 'storage',
+    /* 原生 HLS 抓切片走调试协议，attach / sendCommand 都是它的调用点 */
+    'chrome.debugger': 'debugger',
     /* activeTab 没有对应代码符号。它授予的临时主机权限正是
        getMediaStreamId 在"用户点了图标"那一刻能读到标签页的前提，
        而 getMediaStreamId 本身已经是调用点。 */

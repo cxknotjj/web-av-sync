@@ -128,7 +128,8 @@ function makeEnv(opts) {
     }
   };
 
-  const ctx = vm.createContext({
+  let ctx = null;
+  const sandbox = {
     chrome: chrome,
     console: console,
     setTimeout: setTimeout,
@@ -141,8 +142,17 @@ function makeEnv(opts) {
     Object: Object,
     Array: Array,
     isFinite: isFinite,
-    JSON: JSON
-  });
+    JSON: JSON,
+    /* background.js 用 importScripts 把抓切片和授权两块挂进同一个全局环境。
+       测试里按同样的方式真的加载，否则 split 出去的函数就找不到了。 */
+    importScripts: function () {
+      for (let i = 0; i < arguments.length; i++) {
+        const f = arguments[i];
+        vm.runInContext(fs.readFileSync(path.join(APP, f), 'utf8'), ctx, { filename: f });
+      }
+    }
+  };
+  ctx = vm.createContext(sandbox);
 
   vm.runInContext(fs.readFileSync(path.join(APP, 'background.js'), 'utf8'), ctx, { filename: 'background.js' });
   env.chrome = chrome;

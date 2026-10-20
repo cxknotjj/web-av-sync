@@ -9,7 +9,8 @@
     "offscreen",
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "debugger"
   ],
   "optional_host_permissions": [
     "*://*/*"

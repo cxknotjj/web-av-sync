@@ -118,17 +118,59 @@ tabCapture  ──→  MediaStreamSource  ──→  DelayNode  ──→  desti
 
 **如果面板显示「刷新页面生效」而不是「双向需授权」**，说明站点早就授权了，只是当前页面加载时脚本还没注册上。点一下按钮就会补注册并自动刷新，不会再弹授权框——`permissions.request` 即使权限已存在也要求手势，这种情况走的是另一条不需要手势的通道。
 
+### 三条链路（按代价从低到高）
+
+点「启用双向」时不是只有一条路可走。代码按下面的顺序试，能省则省：
+
+| 顺序 | 链路 | 数据从哪来 | 额外带宽 | 代价 |
+| --- | --- | --- | --- | --- |
+| ① | **MSE 复用** | 被 hook 到的 `appendBuffer` 音频片段 | **零** | 要站点授权 + `document_start` 注入 |
+| ② | **调试协议抓切片** | `chrome.debugger` + `Network.getResponseBody` 取回播放器**已经下载过**的 ts | **零** | 页面顶部出现「正在调试」黄条，每片一次 RPC |
+| ③ | **再拉一路** | `<audio src="同一路流">`，浏览器重新解码 | **双倍** | 无 |
+
+①和②都拿不到时才落到③。②失败（抓不到切片、调试器被占用）会自动降到③，用户不需要自己选。
+
 ### 限制
 
 | 限制              | 说明                                                                                                               |
 | --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| 两条链路各有前提        | **MSE 播放器**（`blob:`）：复用页面已下载的片段，零额外带宽，首次要授权 + 刷新。**直连媒体**（`.m3u8` / `.mp4`）：浏览器自己再解码一遍，零权限零依赖，但双倍带宽 |
-| 零额外带宽，但双倍解码     | MSE 路线。直连路线反过来：带宽双倍，但不需要授权                                                                                       |
+| 三条链路各有前提        | **MSE 播放器**（`blob:`）走①，零额外带宽但要授权 + 刷新；**原生 HLS**（`.m3u8`）优先走②，抓不到再退③；**直连 mp4** 只能走③  |
 | 能提前多少取决于缓冲      | 只能提前到「已经下载到」的位置，超出会卡住等数据                                                                                         |
 | 误差几十毫秒          | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20\~70ms                                                                          |
 | 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音                                                                                            |
 
-### 直连媒体路线（原生 HLS / mp4）
+### 链路②：调试协议抓切片（原生 HLS）
+
+原生 HLS 由浏览器内置 demuxer 处理，ts 字节全程不经过 JS——没有 `MediaSource`、没有 `appendBuffer`，hook 无处可挂。但调试协议能看到这批字节：
+
+```js
+chrome.debugger.attach({ tabId }, '1.3');
+chrome.debugger.sendCommand({ tabId }, 'Network.enable', { ... });
+
+// 切片 loadingFinished 之后才能取
+const r = await chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', { requestId });
+// r.body 是 base64，转成 Uint8Array 后交给 mux.js
+```
+
+拿到字节后还要转一次格式：**ts 不能直接喂 MSE**（`addSourceBuffer('audio/mp2t')` 实测抛 `NotSupportedError`），得用 `mux.js` demux 成 fMP4：
+
+```js
+const t = new muxjs.mp4.Transmuxer({ keepOriginalTimestamps: true, remux: false });
+t.on('data', (seg) => {
+  if (seg.type !== 'audio') return;   // remux:false 才会把音频单独吐出来
+  // initSegment 只 append 第一次，data 每片都 append
+});
+```
+
+几个实测踩到的点：
+
+- **必须等 `loadingFinished`**：还在流式传输时取会报 `No data found for resource with given identifier`
+- **`remux: false`**：默认输出 `combined` 段，含 `avc1` 视频轨，`audio/mp4` 的 SourceBuffer 会直接拒收
+- **init segment 只 append 一次**：重复 append 会让 SourceBuffer 报错
+- **CDP 的 `frameId` 不能直接给 `chrome.tabs.sendMessage`**：前者是字符串，后者要数字，得用 content 自己报上来的 `sender.frameId`
+- **match pattern 里不能写端口**：`http://127.0.0.1:8124/*` 这种写法整条规则会失效，要写成 `http://127.0.0.1/*`（不带端口反而匹配所有端口）
+
+### 链路③：直连媒体再拉一路（原生 HLS / mp4）
 
 `video.src` 直接是 `.m3u8` 或 `.mp4` 时，数据在浏览器媒体栈里，`appendBuffer` 不会被调用，MSE 路线无从复用。这条路线换成**自己再拉一路**：
 
@@ -145,35 +187,43 @@ audio.currentTime = video.currentTime − currentMs/1000
 - **ts 切片不能直接喂 MSE**：`MediaSource.isTypeSupported('video/mp2t')` 虽然返回 true，但 `addSourceBuffer('video/mp2t')` 实测抛 `NotSupportedError`——`isTypeSupported` 会撒谎，必须以实际 append 为准
 - 代价：同一路流下载和解码各跑两遍
 
-### 两条路线的完整对照
+### 三条链路的完整对照
 
-| | MSE 路线（`blob:`） | 直连路线（`.m3u8` / `.mp4`） |
-|---|---|---|
-| 触发条件 | 页面用 hls.js / dash.js 等 MSE 播放器 | `video.currentSrc` 是直连地址 |
-| 数据来源 | `MediaSource.prototype.addSourceBuffer` 处截获的 fMP4 片段 | 浏览器对同一 URL 再解码一遍 |
-| 额外带宽 | **零**（复用页面已下载的） | **双倍** |
-| 额外解码 | 双倍 | 双倍 |
-| 需要的权限 | 站点授权（`optional_host_permissions`）+ 刷新一次 | **零权限、零刷新** |
-| 注入时机 | 必须 `document_start`，否则拿不到 init segment | 无要求，点一下就行 |
-| 失效场景 | 页面不用 MSE | 流需要 Referer/token 校验、DRM、直播窗口太窄 |
+| | ① MSE 复用（`blob:`） | ② 调试协议抓切片（`.m3u8`） | ③ 直连再拉一路（`.m3u8` / `.mp4`） |
+|---|---|---|---|
+| 触发条件 | 页面用 hls.js / dash.js 等 MSE 播放器 | `video.currentSrc` 是 `.m3u8` 且 mux.js 可用 | ①②都不成立 |
+| 数据来源 | `addSourceBuffer` 处截获的 fMP4 片段 | 调试协议取回播放器已下载的 ts，mux.js 转 fMP4 | 浏览器对同一 URL 再解码一遍 |
+| 额外带宽 | **零** | **零** | **双倍** |
+| 需要的权限 | 站点授权 + 刷新一次 | 站点授权 + `debugger` 权限 | **零权限、零刷新** |
+| 副作用 | 无 | 页面顶部「正在调试此浏览器」黄条 | 无明显副作用，只是费流量 |
+| 注入时机 | 必须 `document_start`，否则拿不到 init segment | 必须 `document_start` | 无要求，点一下就行 |
+| 失效场景 | 页面不用 MSE | 调试器已被 DevTools 占用、切片迟迟不下完、流是 fMP4 分片 | 流需要 Referer/token 校验、DRM、直播窗口太窄 |
 
-两条路共用同一套 UI 和同步循环（`syncTick`），只有"音频从哪来"这一段不同：
+三条链路共用同一套 UI 和同步循环（`syncTick`），只有"音频从哪来"这一段不同：
 
 ```js
-if (kind === 'mse') {
-  enhMS = new MediaSource();
-  enhMS.__adsOwn = true;                       // 避免 hook 抓到自己
-  enhAudio.src = URL.createObjectURL(enhMS);
-  enhMS.addEventListener('sourceopen', function () {
-    enhBuf = enhMS.addSourceBuffer(audioMime); // audio/mp4; codecs="mp4a.40.2"
-    enhBuf.addEventListener('updateend', pump); // 把缓存的片段依次塞进去
-  });
-} else {
-  enhAudio.src = video.currentSrc;            // 直连：交给浏览器自己解码
-}
+// 分派：能复用就复用，复用不了再想办法
+if (hookReady && chunks.length)      startMseReuse(v);      // ①
+else if (kind === 'hls' && muxjs)    startNativeCapture(v); // ②，失败自动退 ③
+else if (kind === 'hls' || kind === 'direct') startViaSrc(v); // ③
 ```
 
-同步这一步两边完全一样：
+三条链路建出来的 `enhAudio` 形态不同，但后面完全一样：
+
+```js
+// ① 复用：自己建 MediaSource，等 hook 到的片段灌进来
+enhMS = new MediaSource();
+enhMS.__adsOwn = true;                       // 避免 hook 抓到自己
+enhAudio.src = URL.createObjectURL(enhMS);
+
+// ② 抓取：同样建 MediaSource，但片段由后台通过调试协议送来
+enhBuf = enhMS.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+
+// ③ 再拉一路：直接交给浏览器解码
+enhAudio.src = video.currentSrc;
+```
+
+同步这一步三条完全一样：
 
 ```js
 const want = videoEl.currentTime - currentMs / 1000;  // 负值 = 音频跑到画面前面
@@ -270,16 +320,25 @@ if (document.documentElement.dataset.adsHooked === '1') {
 ## 文件
 
 ```
-manifest.json     MV3 清单
-background.js     service worker：点图标接管、管理 offscreen、状态广播
-offscreen.html/js 音频处理：getUserMedia → DelayNode → destination
-content.js        页面内面板（Shadow DOM，全屏跟随）+ 错误提示 + 双向模式
-inject-main.js    MAIN world：劫持 appendBuffer，复制音频片段给双向模式用
-icons/            16 / 32 / 48 / 128 四档图标（make-icons.js 生成）
-tools/            图标生成、商店素材生成、打包校验、CDP 加载脚本
-store/            商店提交材料：文案、截图、隐私政策
-dist/             打好的提交包（package.js 产出）
+manifest.json      MV3 清单
+background.js      service worker 入口：点图标接管、管理 offscreen、消息路由
+bg-auth.js         站点授权与增强脚本注册（permissions.request 的手势约束都在这）
+bg-capture.js      原生 HLS 抓切片：chrome.debugger + Network.getResponseBody
+offscreen.html/js  音频处理：getUserMedia → DelayNode → destination
+ads-template.js    面板与提示的样式、结构模板（纯字符串，不碰 DOM）
+ads-ui.js          面板、提示条、滑块/滚轮/键盘/拖动/全屏跟随 → window.ADS.ui
+ads-enhance.js     双向模式三条链路 + 同步循环 → window.ADS.enh
+content.js         内容脚本入口：消息路由、初始化
+inject-main.js     MAIN world：劫持 appendBuffer，复制音频片段给双向模式用
+mux.min.js         原生 HLS 那条链路用来把 ts 转成 fMP4（Apache-2.0）
+icons/             16 / 32 / 48 / 128 四档图标（make-icons.js 生成）
+tools/             图标生成、商店素材生成、打包校验、CDP 加载脚本
+store/             商店提交材料：文案、截图、隐私政策
+dist/              打好的提交包（package.js 产出）
 ```
+
+后台两个模块用 `importScripts` 挂进 SW，和 `background.js` 共用同一个全局环境；
+内容脚本几个文件则是靠 manifest 的顺序加载，通过 `window.ADS` 串起来。
 
 ***
 
