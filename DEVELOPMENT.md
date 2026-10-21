@@ -118,7 +118,61 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 | 误差几十毫秒          | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20\~70ms                                                                          |
 | 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音                                                                                            |
 
-### 链路②：调试协议抓切片（原生 HLS）
+### 缓冲跟不上提前量时：按住画面等下载
+
+`syncTick()` 每 250ms 对一次表：音频要播的位置是 `want = video.currentTime - currentMs/1000`，
+`bufferedLead(want)` 返回「want 之后还剩多少秒缓冲」，负数就是「还差多少秒」。
+
+| 情形 | 行为 |
+| --- | --- |
+| `lead >= 0.3`（RESUME_LEAD） | 正常播，差 40ms 以上就 seek 对齐 |
+| `lead` 在 -0.4 ~ 0.3 之间 | 原地等下一拍 —— 网络抖一下很正常，别为它按暂停 |
+| `lead < -0.4`（WAIT_GAP） | **`stallNow()`：视频和音频一起 pause**，面板右侧改成「等缓冲 · 还差 N 秒」 |
+| 等待中缓冲还在长 | 继续等，多长都行（面板数字在减少，用户看得见） |
+| 缓冲 4 秒（WAIT_STUCK_MS）一点没长 | `giveUpWait()`：**把提前量自动降到缓冲撑得住的位置**并恢复播放 |
+| 总等待超 30 秒（WAIT_MAX_MS） | 同上，无条件放弃 |
+
+两个关键设计：
+
+#### 位置对齐：小偏差用倍速追，绝不动不动就 seek
+
+`alignAudio()` 的规则（这是「声音一顿一顿」的修复）：
+
+| 偏差 | 处理 |
+| --- | --- |
+| < 40ms | 不管，倍速保持 1 |
+| 40ms ~ 350ms | `playbackRate = 1 - drift/4`（上限 ±4%），平滑追上 |
+| > 350ms | seek 一次到位 |
+
+以前是 `|偏差| > 40ms` 就 seek，而 `syncTick` 每 250ms 跑一拍 —— 音频时钟和视频时钟
+本来就有点相对漂移，结果就是**每秒 seek 好几次**，每次 seek 都打断解码输出，
+听感上就是一顿一顿。倍速方案下 0.2 秒的偏差约 5 秒平滑追完，听不出变速
+（±4% 对音高的影响远小于人对节奏突变的敏感）。
+
+实测（`test-env/test-smooth.js`，提前 -3 秒连播）：稳态段 drift 依次
+-0.13 → -0.084 → -0.053 递减、rate 1.037 → 1.026 → 1.014 → 1，**零 seek**；
+仅剩的 seek 都来自 stall 恢复和测试页 loop 重置造成的时间跳变，正常站点没有后者。
+
+恢复/暂停/退出时把 `playbackRate` 复位成 1，别让降速状态残留到下一段音频上。
+
+**stalledByUs 必须和用户暂停分开。** 等待时视频是我们自己 pause 的，下一拍 `syncTick`
+会先撞上 `if (videoEl.paused)` 那条分支直接 return —— 所以等待检查必须放在它前面，
+否则视频永远放不开。
+
+**放弃时必须降档，不能只放画面。** 只 `play()` 的话下一拍 lead 还是负的，立刻又被按住，
+变成「卡四秒、动半秒、再卡四秒」的循环，比一直卡着更难用。所以 `giveUpWait()` 直接算出
+`bufferedEnd() - currentTime - 1.2` 能撑住的最大提前量，用 `ui.setValue()` 降到位、
+给 SW 发 `setDelay` 同步音频链，再一次恢复。降过一次还撑不住的（`stallGiveUps >= 1`），
+第二次直接归零 —— 与其反复降一点卡一段，不如一步到位。`enterEnhanced()` 会把计数清零，
+每次重新进双向都给缓冲一次机会。
+
+`exitEnhanced()` / `enhFail()` 里要把画面放开：等待中用户点了停止、或者链路降级，
+视频都还停在我们按下的暂停上，不 `play()` 的话用户的视频就永远停住了。
+
+排查用 `adsState` 里新增的两个字段：`stalled`（当前是不是扩展按住的）和
+`bufferedLead`（差多少秒）。
+
+
 
 > **这一条只在完整版里存在。** 它需要 `debugger` 权限，而该权限既不能在安装时隐藏，也不能改成可选（Chromium 明确把 `debugger` 排除在 `optional_permissions` 之外），安装弹窗上会多出「访问网页调试后端」和「读取并更改所有网站上的所有数据」两条警告。上架版为避开这两条警告把整条链路裁掉，原生 HLS 站点退回链路③。
 
@@ -150,6 +204,39 @@ t.on('data', (seg) => {
 - **init segment 只 append 一次**：重复 append 会让 SourceBuffer 报错
 - **CDP 的 `frameId` 不能直接给 `chrome.tabs.sendMessage`**：前者是字符串，后者要数字，得用 content 自己报上来的 `sender.frameId`
 - **match pattern 里不能写端口**：`http://127.0.0.1:8124/*` 这种写法整条规则会失效，要写成 `http://127.0.0.1/*`（不带端口反而匹配所有端口）
+- **标签页一进全屏，调试会话就被掐了**：见下一小节，这是这套机制最容易踩的坑
+
+#### 全屏会把调试会话掐掉
+
+实测于 Edge 151，容器全屏和 `<video>` 全屏都一样：
+
+```
+非全屏：attach 后每个切片都有  hit:seq1.ts → fin → body:173580
+进全屏后：一条 Network 事件都不再来，页面该请求的切片照常在请求
+```
+
+全屏中调用 `chrome.debugger.detach()` 会报 **`Debugger is not attached to the tab`** —— 说明会话在进入全屏的那一刻已经被浏览器断开了，只是没抛错、也没把错误回传给扩展。于此同时 `chrome.debugger.onDetach` 不一定会通知过来，所以"等它告诉我掉线了再重连"这条路走不通。
+
+后果：抓不到片 → 12 秒兜底计时器到点 → **静默降级成链路③**。用户看到的现象就是「本来零流量，一全屏流量翻倍」，而且退出全屏也不会自己回来。
+
+修法是主动重连，`content.js` 里监听 `fullscreenchange`：
+
+```js
+document.addEventListener('fullscreenchange', function () {
+  if (!window.ADS.enh.isCapturing()) return;   // 不是抓切片链路就别管
+  chrome.runtime.sendMessage({ target: 'sw', type: 'captureReattach' });
+}, true);
+```
+
+SW 那边 `captureReattach()` **必须先 detach 再 attach**：会话可能只是"不送事件"而没真的断开，直接 attach 会报 `Another debugger is already attached`（实测）。
+
+几个细节：
+
+- 必须用 `isCapturing()`（`enhMode === 'capture'`）判断，不能只看 `isEnhanced()`：全屏可能发生在"连接中"（音频还没到手）的时候，那时同样需要重连
+- 进出全屏都要重连，两个方向都会断
+- 重连时 `capPending` 会清空，正在传输的那一片会丢，不影响后续
+- MSE 里已经缓冲的音频不受影响，重连后新片接上就恢复；不会出现"从头再来"
+- 上架版没有链路②，`captureReattach` 这个函数压根不存在（`bg-capture.js` 不进包），SW 里用 `typeof` 守卫后才能调用
 
 #### 为什么不 hook `fetch` / `XMLHttpRequest`
 
@@ -594,6 +681,14 @@ document.documentElement.dataset.adsDiag
 | 有 `evt:` 没 `hit:` | URL 过滤没匹配上 | 有些站切片不带 `.ts` 后缀 |
 | 有 `hit:` 没 `fin` | 流式请求悬着不结束 | 只能靠 12 秒超时降级 |
 | 有 `fin` 没 `body` | 响应体已被回收 | 检查 `Network.enable` 的 buffer 参数 |
+| 全屏前正常、全屏后只剩 `attach-ok` 不再有新事件 | **浏览器把调试会话掐了** | 见「全屏会把调试会话掐掉」，`fullscreenchange` 里已自动重连；如果还断，看 SW 里 `captureReattach` 的返回值 |
+
+**`mux: false` 说明注入的脚本清单漏了 `mux.min.js`**
+
+`pickRoute()` 里 `typeof muxjs === 'undefined'` 就直接跳过② —— 原生 HLS 站点会静默降级到③，面板上看到的是「重新拉一路」，看不出任何异常。
+
+这份清单只有一处权威来源：`bg-auth.js` 的 `contentScriptFiles()`。**它同时供两条注入路径使用**（点图标后的 `chrome.scripting.executeScript`、站点授权后的 `registerContentScripts`）。以前 `background.js` 自己维护了一份 `CONTENT_SCRIPTS` 常量，漏了 `mux.min.js`，于是只有「授权过的站点」才走得了②，靠点图标注入的页面永远降级。现在两处都调同一个函数。
+
 
 **三种观察通道，各有不可替代的位置**
 

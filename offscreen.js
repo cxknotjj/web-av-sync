@@ -12,7 +12,11 @@
  * ================================================================ */
 
 const MAX_DELAY_SEC = 10.5;      // UI 上限 10s，留一点余量给 ramp
-const METER_INTERVAL = 150;
+const METER_INTERVAL = 250;
+/* 电平条是视觉件：变化小于「上次的 5%」就别发消息了。静音时 rms 恒为 0，
+   这条阈值能让 capture 期间的跨进程消息从每秒 6~7 条降到接近 0。 */
+const METER_DELTA_RATIO = 0.05;
+const METER_DELTA_MIN = 0.004;
 
 let ctx = null;
 let stream = null;
@@ -23,6 +27,7 @@ let analyser = null;
 let meterTimer = null;
 let meterBuf = null;
 let lastRms = 0;
+let lastSentRms = -1;
 
 let currentDelayMs = 0;
 let active = false;
@@ -105,6 +110,7 @@ async function stop() {
 
   active = false;
   lastRms = 0;
+  lastSentRms = -1;
   currentDelayMs = 0;
 }
 
@@ -169,6 +175,13 @@ function tick() {
   } catch (e) { /* 缓冲区异常时保持上一次读数 */ }
 
   lastRms = rms;
+
+  /* 和「上次发出去的值」比，不是和上一次采样比 —— 否则缓慢漂移会一路累积 */
+  const delta = Math.abs(rms - lastSentRms);
+  if (lastSentRms >= 0 && delta < Math.max(lastSentRms * METER_DELTA_RATIO, METER_DELTA_MIN)) {
+    return;
+  }
+  lastSentRms = rms;
 
   chrome.runtime.sendMessage({
     target: 'sw',

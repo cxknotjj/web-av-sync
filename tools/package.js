@@ -92,31 +92,37 @@ function buildZip(files) {
     const data = item.data;
     const crc = crc32(data);
 
+    /* png 已经是压缩格式，deflate 一遍只会更大；文本（js/json/md）能压 3~4 倍。
+       之前一律 store 是错的 —— mux.min.js 115KB 原样进包，白占了一半体积。 */
+    const isPng = /\.png$/i.test(item.name);
+    const stored = isPng ? data : zlib.deflateRawSync(data, { level: 9 });
+    const method = isPng ? 0 : 8;
+
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);        // version needed
     local.writeUInt16LE(0x0800, 6);    // flag: UTF-8 文件名
-    local.writeUInt16LE(0, 8);         // method: store（已经是压缩过的 png，js 也不值得 deflate）
+    local.writeUInt16LE(method, 8);    // 0 = store（png），8 = deflate（文本）
     local.writeUInt16LE(time, 10);
     local.writeUInt16LE(date, 12);
     local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(stored.length, 18);
     local.writeUInt32LE(data.length, 22);
     local.writeUInt16LE(nameBuf.length, 26);
     local.writeUInt16LE(0, 28);
 
-    locals.push(local, nameBuf, data);
+    locals.push(local, nameBuf, stored);
 
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);      // version made by
     central.writeUInt16LE(20, 6);      // version needed
     central.writeUInt16LE(0x0800, 8);
-    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(method, 10);
     central.writeUInt16LE(time, 12);
     central.writeUInt16LE(date, 14);
     central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(stored.length, 20);
     central.writeUInt32LE(data.length, 24);
     central.writeUInt16LE(nameBuf.length, 28);
     central.writeUInt16LE(0, 30);      // extra
@@ -127,7 +133,7 @@ function buildZip(files) {
     central.writeUInt32LE(offset, 42);
 
     centrals.push(central, nameBuf);
-    offset += local.length + nameBuf.length + data.length;
+    offset += local.length + nameBuf.length + stored.length;
   }
 
   const centralBuf = Buffer.concat(centrals);

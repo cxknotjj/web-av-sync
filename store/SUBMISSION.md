@@ -14,11 +14,18 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 
 | 字段 | 当前值 | 限制 | 状态 |
 |---|---|---|---|
-| Name | 音画偏移 · 标签页音频 | ≤45 字符 | 14 字符，通过 |
-| Description | 接管当前标签页的音频输出做实时延迟，修正音画不同步。页面播放器、进度条、画质切换全部不动。 | ≤132 字符 | 49 字符，通过 |
+| Name | 音画不同步调节器 | ≤45 字符 | 8 字符，通过 |
+| Description | 接管当前标签页的音频输出做实时延迟，修正音画不同步。页面播放器、进度条、画质切换全部不动。 | ≤132 字符 | 45 字符，通过 |
 | Version | 1.0.0 | `x.y.z` | 通过 |
 
 > 这两项在 `manifest.json` 里，**上传后不可在 Partner Center 修改**。要改必须重打 zip 重新上传。所以文案务必先定稿。
+
+> **改名记录**：`name` 由「音画偏移 · 标签页音频」改为「音画不同步调节器」（2026-10-21），
+> 同步改了 `default_title`、`bg-auth.js` 的 `setTitle`、`ads-template.js` 的面板标题、
+> README 标题、隐私政策（中英名与日期）。
+> **`screenshot-1-scene.png` 和 `screenshot-2-panel.png` 是改名之前重绘的示意图**，
+> 面板左上角仍写着旧名「音画偏移」。这两张要么用 `tools/make-store-assets.py` 重绘，
+> 要么直接换成真机截图（`screenshot-3/4/5-live*.png`，标题已是新名）。
 
 ---
 
@@ -163,14 +170,42 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 
 ### Screenshots（截图）
 
-| 文件 | 尺寸 | 用途 |
-|---|---|---|
-| `store/screenshot-1-scene.png` | 1280×800 | 使用场景：播放器 + 右下角面板 |
-| `store/screenshot-2-panel.png` | 1280×800 | 面板特写 + 各控件标注 |
+| 文件 | 尺寸 | 类型 | 用途 |
+|---|---|---|---|
+| `store/screenshot-1-scene.png` | 1280×800 | 示意图 | 使用场景：播放器 + 右下角面板 |
+| `store/screenshot-2-panel.png` | 1280×800 | 示意图 | 面板特写 + 各控件标注 |
+| `store/screenshot-3-live.png` | 1280×800 | **真机截图** | 刚接管，延迟 0.000 |
+| `store/screenshot-4-live-delay.png` | 1280×800 | **真机截图** | 调到 2.400 秒 |
+| `store/screenshot-5-live-collapsed.png` | 1280×800 | **真机截图** | 面板收起成一条，不挡画面 |
+| `store/screenshot-panel-closeup.png` | 891×717 | **真机截图** | 面板特写，给 README / 详情页内嵌用，**不要传商店**（尺寸不合规） |
 
 > 商店要求至少 1 张，最多 6 张，推荐 1280×800 或 640×400。
 > 政策 1.1.2：截图必须「清晰、信息量大、渲染正确，不得拉伸或模糊」。
-> **这两张是按 content.js 真实配色与布局重绘的示意图**（`tools/make-store-assets.py` 生成），不是真实抓屏。文案与 UI 一致，功能一致，符合要求。如果希望更真实，可以补一张真机截图作为第三张。
+>
+> 前两张是 `tools/make-store-assets.py` 按真实配色重绘的示意图，带标注，信息量比真机图大；
+> 后三张是真机截图（`test-env/shoot.js` 跑出来的，Edge 151 + 上架版扩展 + 本地 HLS 演示页）。
+>
+> **推荐提交顺序**：`screenshot-1-scene` → `screenshot-2-panel` → `screenshot-4-live-delay`
+> → `screenshot-5-live-collapsed`。四张刚好覆盖「场景 / 控件说明 / 实际效果 / 收起态」。
+> `screenshot-3-live`（0.000）和 `screenshot-4-live-delay`（2.400）画面几乎一样，只放一张就够。
+>
+> 画面里的演示片源是 Big Buck Bunny 片头（Blender Foundation，CC-BY 3.0），
+> 用于商店截图没有问题；页面本身是本地 `test-env/hls/demo.html`，不是任何真实站点。
+
+**怎么重截**
+
+```cmd
+node tools/serve-hls.js --port 8127
+node test-env/shoot.js
+```
+
+脚本会自己拉起 Edge、加载上架版、接管、按场景截图，图落在 `test-env/shots/`。
+两个前提：Edge 路径写死在脚本里（`EDGE` 常量），且**必须用 Edge 不能用 Chrome**
+（Chrome 155 起 `--load-extension` 失效）。
+
+脚本给测试副本加了一条 `Alt+Shift+D` 快捷键，因为 `tabCapture` 要 `activeTab`，
+而 `activeTab` 只在真的点了图标/按了快捷键时授予；CDP 点不到浏览器工具栏。
+产品源码没有这条快捷键，只有 `test-env/shot-ext/` 这份拷贝有。
 
 ### Promotional images（推广图）
 
@@ -189,13 +224,24 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 
 ## 四、Privacy（隐私）
 
-### Single purpose（单一用途）
+### Single purpose description（单一用途，表单必填）
+
+Partner Center 的表单是英文界面，**直接粘英文版**（审核看英文最稳）：
+
+```
+Shifts the audio of the current tab earlier or later by a user-selected amount, so the sound matches the picture on screen.
+
+The user clicks the toolbar icon to start, adjusts one slider on an on-page panel, and clicks again to stop. Earlier and later are the same single operation — moving the audio timeline relative to the video — not two separate features.
+```
+
+中文版（若提交中文 listing、审核接受中文理由时用）：
 
 ```
 把当前标签页的音频延迟（或提前）一个用户设定的时长，用于修正视频音画不同步。
 ```
 
 > 两个模式（默认的 tabCapture 延迟、可选的双向偏移）服务于同一个用途：调整当前标签页的音画相对时序。不是两个功能。
+> 写这一栏时**不要**把「双向模式」「抓切片」「重新拉流」当成并列功能列出来——那些是实现手段，列出来会被判成多用途。
 
 ### Permission justification（逐条权限理由）
 
@@ -204,7 +250,11 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 **tabCapture**
 
 ```
-Core functionality. getMediaStreamId() is the only API that can capture a tab's audio output. Without this permission the extension cannot perform its single stated purpose. It is invoked only from the toolbar icon click handler (chrome.action.onClicked), which is a user gesture — capture never starts on its own.
+Core functionality. chrome.tabCapture.getMediaStreamId() is the only API that can capture a tab's audio output, so without this permission the extension cannot perform its single stated purpose at all.
+
+It is invoked only from the toolbar icon click handler (chrome.action.onClicked), which is a real user gesture, and only for the tab the user just clicked. Capture never starts on its own and cannot target a tab the user did not ask for.
+
+The captured MediaStream is routed locally through a Web Audio DelayNode and sent straight to the speakers. Audio is never recorded, never written to disk, never transmitted, and never inspected. Capture stops the moment the user clicks the icon again, clicks Stop on the panel, or closes the tab.
 ```
 
 **offscreen**
@@ -279,21 +329,65 @@ CDN、没有远程脚本、没有任何网络请求。`package.js` 会断言这�
 未修改 / 版权 `Copyright Brightcove, Inc.` / 随包文件 `mux.min.js`、
 `LICENSE-APACHE-2.0.txt`、`THIRD_PARTY_NOTICES.md`。）
 
+### 三个必勾的披露（表单底部，不勾无法提交）
+
+表单最下方 `I certify that the following disclosures are true` 三个框，**全勾**：
+
+| 原文 | 是否勾 | 为什么成立 |
+|---|---|---|
+| I do not sell or transfer user data to third parties, outside of the approved use cases | 勾 | 扩展零网络请求，没有任何数据出口 |
+| I do not use or transfer user data for purposes that are unrelated to my item's single purpose | 勾 | 唯一持久化的数据是滑块上次的毫秒数，只用于还原面板位置 |
+| I do not use or transfer user data to determine creditworthiness or for lending purposes | 勾 | 与金融信贷无关 |
+
+> 这三个勾选是**法律性声明**，和 Data usage 那页的勾选要口径一致：那边全选「不收集」，这边才对得上。
+
 ### Data usage（数据使用声明）
 
-全部勾 **不收集**。特别是以下几项要明确不勾：
+**9 个复选框一个都不勾。** 表单标题是「What user data do you plan to collect from users now or in the future?」，
+只要没有勾选任何一项，就等于声明「不收集任何用户数据」。
 
-- Personally identifiable information
-- Health information
-- Financial and payment information
-- Authentication information
-- Personal communications
-- Location
-- Web history
-- User activity
-- Website content
+| 项目 | 勾 | 原因 |
+|---|---|---|
+| Personally identifiable information | 不勾 | 没有账号、没有标识符 |
+| Health information | 不勾 | 无关 |
+| Financial and payment information | 不勾 | 无关 |
+| Authentication information | 不勾 | 不读密码、不碰登录态 |
+| Personal communications | 不勾 | 不读邮件、聊天 |
+| Location | 不勾 | 不使用 IP / GPS |
+| Web history | 不勾 | 不记录访问过的页面，见下方说明 |
+| User activity | 不勾 | 不记录点击、滚动、键击 |
+| Website content | 不勾 | 不读取文本、图片、链接，见下方说明 |
 
-> 本扩展确实处理音频流，但音频**不离开设备、不落盘、不传输**，因此不属于"收集"。
+> 判据（Chrome / Edge 政策口径一致）：**"collect" = 数据被传输给开发者或第三方，或超出单一用途所需地保存在设备上。**
+> 本扩展：零网络请求、无远程服务、无分析；音频流是内存里的过路数据，
+> 判完后立刻送扬声器，不落盘、不上传、不留副本。所以九项全不勾是准确的，不是"漏填"。
+
+**两个审核可能追问的点，先想好怎么答：**
+
+**① Website content（页面有 `<video>`、还注入脚本）**
+
+扩展只读取 `<video>` 元素自身的时间属性（`currentTime`、`buffered`、`currentSrc`），用于对齐延迟；
+不读取 DOM 文本、图片、链接、表单，也不读 URL 的 path 和 query。
+在 `Certification notes` 里写一句即可：
+
+```
+The content script reads only the time-related properties of <video> elements
+(currentTime, buffered ranges, currentSrc) to keep the panel state in sync.
+No page text, form fields, links, images or URL paths are read.
+```
+
+**② Web history（`chrome.storage.local` 里有 `enhancedOrigins`）**
+
+这个键存的是**用户亲手点过「启用双向」并确认过授权框的站点 origin 列表**，不是浏览记录。
+它只在撤销/恢复授权时用。没有站点被授权时该键为空。回答话术：
+
+```
+chrome.storage.local holds exactly two keys: lastDelayMs (the slider value, an integer)
+and enhancedOrigins (the origins of sites where the user explicitly granted the
+optional per-site permission). The latter is the bookkeeping Chromium requires to
+re-register the document_start script, not a browsing log; it contains no page titles,
+URLs or timestamps, and stays empty unless the user opts in.
+```
 
 ### Privacy policy URL
 

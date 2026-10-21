@@ -125,6 +125,24 @@ async function captureTake(rec, requestId) {
   }
 }
 
+/**
+ * 重新挂上调试会话。
+ *
+ * 为什么需要：标签页一进全屏，Chromium 会把扩展的 debugger 会话 detach 掉，
+ * 之后 Network.requestWillBeSent / loadingFinished 一条都不来 —— 但页面该请求的
+ * 切片照常在请求。表现就是「本来走链路②，一全屏就再也抓不到片」，
+ * 12 秒兜底计时器一到就静默降级成「再拉一路」，用户只看到流量翻倍。
+ *
+ * 必须先 detach 再 attach：会话可能只是「不送事件」而没有真的断开，
+ * 直接 attach 会报 "Another debugger is already attached"（实测）。
+ * frameId 由 content 报上来，因为 CDP 的 frameId 是字符串，不能直接给 sendMessage。
+ */
+async function captureReattach(tabId, frameId) {
+  if (!tabId) return { ok: false, error: '拿不到标签页' };
+  await captureDetach(tabId);
+  return captureAttach(tabId, frameId);
+}
+
 if (chrome.debugger && chrome.debugger.onEvent) {
   chrome.debugger.onEvent.addListener(function (source, method, params) {
     const tabId = source && source.tabId;

@@ -8,10 +8,15 @@
  * ================================================================ */
 
 const OFFSCREEN_URL = 'offscreen.html';
-/** 面板 + 双向逻辑拆成了几个文件，重新注入时要一起给，
+/* 面板 + 双向逻辑拆成了几个文件，重新注入时要一起给，
  *  只给 content.js 会因为它找不到 ADS 直接 return。
- *  build-info.js 必须排第一：后面的文件要读它上面的 ADS_BUILD 标记。 */
-const CONTENT_SCRIPTS = ['build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-enhance.js', 'content.js'];
+ *  build-info.js 必须排第一：后面的文件要读它上面的 ADS_BUILD 标记。
+ *
+ *  具体清单由 bg-auth.js 的 contentScriptFiles() 提供，不要在这里再写一份：
+ *  两套清单必然走岔 —— 曾经这里漏了 mux.min.js，导致「点图标」注入的页面里
+ *  typeof muxjs === 'undefined'，原生 HLS 站点直接从链路② 降级到链路③，
+ *  而只有走过「站点授权」那条 registerContentScripts 路径的页面才正常。
+ *  函数里那个顺序也已经是对的：mux.min.js 在 content.js 之前。 */
 const LAST_DELAY_KEY = 'lastDelayMs';
 
 let creatingOffscreen = null;
@@ -138,7 +143,7 @@ async function start(tabId, streamId, delayMs) {
     /* 注入悬浮面板。失败不影响音频，但现在没有 popup 了，
        面板进不去就等于用户完全没法调延迟，必须让他知道。 */
     try {
-      await chrome.scripting.executeScript({ target: { tabId: tabId }, files: CONTENT_SCRIPTS });
+      await chrome.scripting.executeScript({ target: { tabId: tabId }, files: contentScriptFiles() });
       await sendToTab(tabId, { type: 'panel-show', delayMs: delayMs, rms: res.rms || 0 });
     } catch (e) {
       /* chrome:// 、扩展商店等页面不允许注入 */
@@ -254,7 +259,7 @@ async function toggle(tab) {
 async function notifyError(tabId, text) {
   let injected = false;
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: CONTENT_SCRIPTS });
+    await chrome.scripting.executeScript({ target: { tabId: tabId }, files: contentScriptFiles() });
     injected = true;
   } catch (e) {}
 
@@ -350,6 +355,19 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     return false;
   }
 
+  /* 全屏切换后调试会话被浏览器 detach 了，content 会来要一次重连。
+     上架版没有链路②，这个函数根本不存在（bg-capture.js 不进包），直接回 ok:false。 */
+  if (msg.target === 'sw' && msg.type === 'captureReattach') {
+    if (!CAPTURE_BUILD || typeof captureReattach !== 'function') {
+      sendResponse({ ok: false, error: 'no-capture' });
+      return false;
+    }
+    captureReattach(sender && sender.tab && sender.tab.id, sender && sender.frameId)
+      .then(sendResponse)
+      .catch(function () { sendResponse({ ok: false }); });
+    return true;
+  }
+
   if (msg.target !== 'sw') return false;
 
   switch (msg.type) {
@@ -402,7 +420,7 @@ chrome.tabs.onUpdated.addListener(function (tabId, info) {
   if (info.status === 'complete') {
     setTimeout(function () {
       if (tabId !== currentTabId) return;
-      chrome.scripting.executeScript({ target: { tabId: tabId }, files: CONTENT_SCRIPTS })
+      chrome.scripting.executeScript({ target: { tabId: tabId }, files: contentScriptFiles() })
         .then(function () {
           return getState().then(function (st) {
             return sendToTab(tabId, {

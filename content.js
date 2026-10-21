@@ -141,6 +141,24 @@
     }
   });
 
+  /* ---------------- 全屏：调试会话会被浏览器掐掉 ----------------
+   * 实测（Edge 151）：标签页一进全屏，Chromium 就把扩展挂在它上面的 debugger
+   * 会话 detach 了，之后 Network 事件一条都不来 —— 页面该请求的切片照常在请求，
+   * 只是扩展看不见。表现就是「本来抓得好好的，一全屏就抓不到了」，十几秒后
+   * 兜底降级成再拉一路。
+   *
+   * 这里只在真的处于抓切片链路时重连，而且进出全屏都做一遍：
+   * MSE 里已经缓冲的音频不受影响，重连后新片接上就恢复。 */
+  document.addEventListener('fullscreenchange', function () {
+    let capturing = false;
+    try { capturing = !!E.isCapturing(); } catch (e) {}
+    if (!capturing) return;
+    try {
+      chrome.runtime.sendMessage({ target: 'sw', type: 'captureReattach' })
+        .catch(function () {});
+    } catch (e) {}
+  }, true);
+
   /* ---------------- 初始化 ---------------- */
 
   E.init(U);

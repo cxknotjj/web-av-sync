@@ -77,6 +77,24 @@
   let enhGuard = null;        /* 试运行超时计时器，非 null 表示还在「未落定」阶段 */
   let capInitDone = false;    /* 调试通道下，init segment 只需 append 一次 */
   let capBytes = 0;           /* 已经解出多少音频字节，用来判断「真有数据了」 */
+  let guardMute = null;       /* 接管期间守住「原视频静音」的监听器 */
+
+  /* 等缓冲：要提前的量超过已下载的量时，音频会 underflow（画面在走、没声音）。
+     这时由我们主动按住视频，等音频追上来再放开。stalledByUs 必须记住
+     「这次暂停是自己按的」，否则下一拍会被当成用户暂停，永远放不开。 */
+  let stalledByUs = false;
+  let stallSince = 0;
+  let stallTail = 0;          /* 进等待时的缓冲末尾，用来判断「还在不在下载」 */
+  let stallTailAt = 0;        /* 缓冲最后一次增长的时刻 */
+  /* 已经因为等不到而自动降档几次。降过一次还不够的，第二次直接归零 ——
+     否则会「降一点、再卡四秒、再降一点」，比一直卡着还难受。 */
+  let stallGiveUps = 0;
+  const WAIT_GAP = 0.4;       /* 目标位置落后缓冲区末尾超过这么多才值得暂停 */
+  const RESUME_LEAD = 1.5;    /* 缓冲领先目标位置这么多才放开 —— 要比 WAIT_GAP 大得多，
+                                 否则一放开走两步又得按住，声音就是一顿一顿的 */
+  const DRIFT_SEEK = 0.35;    /* 音频位置偏差超过这个才 seek，小偏差用倍速慢慢追 */
+  const WAIT_STUCK_MS = 4000; /* 缓冲连续这么久一点没长 = 真下不来了，别等了 */
+  const WAIT_MAX_MS = 30000;  /* 总等待上限，防止在一个永远长不起来的站上干等 */
 
   /* ---------------- 页面探测 ---------------- */
   function pickVideo() {
@@ -180,14 +198,30 @@
     pump();
   }
 
+  let appendFails = 0;        /* 连续 append 失败计数 */
+  let appendFailToasted = false;  /* 「连续对不上」的提示只弹一次，别刷屏 */
+
   function pump() {
     if (!enhBuf || enhBuf.updating || !appendQueue.length) return;
     if (enhMS && enhMS.readyState !== 'open') return;
     const next = appendQueue.shift();
     try {
       enhBuf.appendBuffer(next);
+      if (appendFails) appendFails = 0;
     } catch (e) {
-      /* 片段被拒（时间戳不连续之类）就丢掉，别让队列卡死 */
+      /* 片段被拒（时间戳不连续之类）就丢掉，别让队列卡死。
+         但不能完全无声无息：连续丢片用户只会觉得「声音缺了一节」，
+         得给个说法，也方便从 adsDiag 里看到规律。 */
+      appendFails++;
+      try {
+        document.documentElement.dataset.adsDiag =
+          ((document.documentElement.dataset.adsDiag || '') +
+            '|append-fail:' + String((e && e.name) || e).slice(0, 24)).slice(-300);
+      } catch (e2) {}
+      if (appendFails >= 5 && !appendFailToasted && ui) {
+        appendFailToasted = true;
+        ui.showToast('音频片段连续对不上（页面音轨有空洞），声音可能偶尔缺一截');
+      }
       setTimeout(pump, 0);
     }
   }
@@ -202,11 +236,166 @@
     return false;
   }
 
+  /** 目标位置相对已缓冲数据的余量。
+   *  正数 = 后面还有这么多秒可以播；负数 = 还差这么多秒才够播到那儿。
+   *  用它区分「只差一丁点，等下一拍就行」和「差得远，必须按住画面」。
+   *  缓冲区为空时返回 -999，等于「一秒都没有」，直接按暂停。 */
+  function bufferedLead(t) {
+    if (!enhAudio) return -999;
+    const b = enhAudio.buffered;
+    let worst = -999;
+    for (let i = 0; i < b.length; i++) {
+      if (t >= b.start(i) && t <= b.end(i)) return b.end(i) - t;
+      const gap = t - b.end(i);
+      if (gap > 0 && -gap > worst) worst = -gap;
+    }
+    return worst;
+  }
+
+  /** 音频位置对齐。
+   *  小偏差（40ms ~ 350ms）用 playbackRate 慢慢追：每秒最多偏差的 1/4，上限 ±4%。
+   *  绝不频繁 seek —— seek 会打断解码输出，250ms 一拍 tick 下来就是「一顿一顿」。
+   *  以前这里 |偏差|>40ms 就 seek，正是声音断断续续的元凶。
+   *  ±4% 的变速对音高的影响听不出来；偏差 0.2 秒时约 5 秒平滑追完。 */
+  function alignAudio(want) {
+    const drift = enhAudio.currentTime - want;
+    const abs = Math.abs(drift);
+
+    if (abs > DRIFT_SEEK) {
+      try { enhAudio.playbackRate = 1; } catch (e) {}
+      try { enhAudio.currentTime = want; } catch (e) {}
+      return;
+    }
+
+    if (abs < 0.04) {
+      if (enhAudio.playbackRate !== 1) {
+        try { enhAudio.playbackRate = 1; } catch (e) {}
+      }
+      return;
+    }
+
+    const rate = 1 - drift / 4;
+    if (Math.abs(enhAudio.playbackRate - rate) > 0.005) {
+      try { enhAudio.playbackRate = rate; } catch (e) {}
+    }
+  }
+
+  /** 缓冲末尾的绝对时间（秒）。没有缓冲就是 0。 */
+  function bufferedEnd() {
+    if (!enhAudio) return 0;
+    const b = enhAudio.buffered;
+    return b.length ? b.end(b.length - 1) : 0;
+  }
+
+  /** 按住画面等缓冲 */
+  function stallNow() {
+    if (!stalledByUs) {
+      stalledByUs = true;
+      stallSince = Date.now();
+      stallTail = bufferedEnd();
+      stallTailAt = stallSince;
+      publishState();
+    }
+    try { enhAudio.playbackRate = 1; } catch (e) {}
+    try { if (!videoEl.paused) videoEl.pause(); } catch (e) {}
+    try { if (!enhAudio.paused) enhAudio.pause(); } catch (e) {}
+    paintRouteMeta();
+  }
+
+  /** 缓冲够了，放开画面 */
+  function resumeNow() {
+    stalledByUs = false;
+    stallSince = 0;
+    publishState();
+    let p = null;
+    try { p = videoEl.play(); } catch (e) {}
+    if (p && p.catch) {
+      p.catch(function () {
+        /* 浏览器拒绝恢复播放（极罕见）。停在这儿等于把用户的视频卡死，
+           不如直接退回页面原声 —— 至少画面能继续走。 */
+        if (ui) ui.showToast('视频没能自动恢复播放，已退出双向模式');
+        exitEnhanced();
+      });
+    }
+    if (enhAudio.paused) {
+      const q = enhAudio.play();
+      if (q && q.catch) q.catch(function () {});
+    }
+    paintRouteMeta();
+  }
+
+  /** 等不到了：把提前量降到缓冲撑得住的位置，就地恢复。
+   *  不能只是「放开画面」—— 那样下一拍又会被按住，变成十几秒卡一下的循环，
+   *  比一直卡着更难用。降到能做的值，用户立刻有声有画，面板上数字同步变小。 */
+  function giveUpWait() {
+    /* 第一次还给缓冲留 1.2 秒余量 —— 恢复播放的瞬间 currentTime 就在走，
+       留太少等于刚放开就又得按住。降过一次还撑不住的，直接归零。 */
+    const budget = stallGiveUps > 0
+      ? 0
+      : Math.max(0, bufferedEnd() - videoEl.currentTime - 1.2);
+    const target = Math.max(-budget * 1000, currentMs());
+    stallGiveUps++;
+
+    stalledByUs = false;
+    stallSince = 0;
+
+    if (target !== currentMs()) {
+      if (ui) ui.setValue(target);
+      try {
+        chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: target })
+          .catch(function () {});
+      } catch (e) {}
+    }
+
+    if (ui) {
+      ui.showToast(target === 0
+        ? '缓冲一直没跟上，提前量已归零，只保留延迟。'
+        : '缓冲跟不上，提前量已自动降到 ' + Math.abs(target / 1000).toFixed(1) + ' 秒。');
+    }
+
+    alignAudio(videoEl.currentTime - currentMs() / 1000);
+    publishState();
+    let p = null;
+    try { p = videoEl.play(); } catch (e) {}
+    if (p && p.catch) p.catch(function () {});
+    if (enhAudio.paused) {
+      const q = enhAudio.play();
+      if (q && q.catch) q.catch(function () {});
+    }
+    paintRouteMeta();
+  }
+
   function syncTick() {
     if (!enhanced || !videoEl || !enhAudio) return;
     pump();
     /* 顺手把「还能提前多少」刷到面板上 */
     paintRouteMeta();
+
+    /* ---------------- 正在等缓冲 ----------------
+     * 这一段必须放在「videoEl.paused 就停音频」前面：等缓冲时视频正是被我们自己
+     * 按住的，走下面那条分支只会一直 return，再也没人把它放开。 */
+    if (stalledByUs) {
+      const need = videoEl.currentTime - currentMs() / 1000;
+      if (bufferedLead(need) >= RESUME_LEAD) {
+        alignAudio(need);
+        resumeNow();
+        return;
+      }
+
+      /* 只要还在下载就继续等 —— 面板上「还差 N 秒」在减少，用户是看得见的。
+         真正该放弃的信号是「缓冲一动不动」。 */
+      const tail = bufferedEnd();
+      if (tail > stallTail + 0.05) {
+        stallTail = tail;
+        stallTailAt = Date.now();
+      }
+      const stuck = Date.now() - stallTailAt > WAIT_STUCK_MS;
+      const tooLong = Date.now() - stallSince > WAIT_MAX_MS;
+      if (stuck || tooLong) { giveUpWait(); return; }
+
+      paintRouteMeta();
+      return;
+    }
 
     /* 视频暂停时音频也要停，否则声音会跑到画面前面 */
     if (videoEl.paused) {
@@ -219,15 +408,14 @@
        所以 audio 要播的位置是 video.currentTime - currentMs/1000：
        currentMs=-3000 → audio 跑到画面前面 3 秒的内容 → 观众提前 3 秒听到。 */
     const want = videoEl.currentTime - currentMs() / 1000;
-    if (bufferedHas(want)) {
-      if (Math.abs(enhAudio.currentTime - want) > 0.04) {
-        try { enhAudio.currentTime = want; } catch (e) {}
-      }
-      return;
-    }
+    if (bufferedHas(want)) { alignAudio(want); return; }
 
-    /* 目标位置还没缓冲到。离得远就先 seek 过去 —— media element 的 seek
-       会自己驱动加载那一段；离得近就原地等缓冲追上，别来回跳。 */
+    /* 目标位置还没缓冲到。差得多 = 下载跟不上设定的提前量。这时如果放任画面
+       继续走，音频就会 underflow：画面正常、声音没了，而且越走越远，再也追不上。
+       所以先按住画面，等缓冲追上来。 */
+    if (bufferedLead(want) < -WAIT_GAP) { stallNow(); return; }
+
+    /* 只差一丁点（网络抖一下）：原地等下一拍，别 seek，也别停画面 */
     if (Math.abs(enhAudio.currentTime - want) > 2.5) {
       try { enhAudio.currentTime = want; } catch (e) {}
     }
@@ -258,7 +446,22 @@
     enhanced = false;
 
     if (videoEl) {
+      if (guardMute) {
+        try { videoEl.removeEventListener('volumechange', guardMute, true); } catch (e) {}
+        guardMute = null;
+      }
       try { videoEl.muted = false; } catch (e) {}
+      /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
+         必须放开 —— 不然后台一拆，用户的视频就永远停住了 */
+      if (stalledByUs) {
+        stalledByUs = false;
+        stallSince = 0;
+        try { enhAudio.playbackRate = 1; } catch (e) {}
+        try {
+          const p = videoEl.play();
+          if (p && p.catch) p.catch(function () {});
+        } catch (e) {}
+      }
       videoEl = null;
     }
 
@@ -274,6 +477,15 @@
   function enhReady() {
     if (!videoEl || !enhAudio || enhanced) return;
     if (enhGuard) { clearTimeout(enhGuard); enhGuard = null; }
+
+    /* 有些播放器会自己把静音改回去 —— 那样扩展和页面同时出声（双声）。
+       接管期间守住 muted。守卫在我们自己的赋值触发的 volumechange 里
+       只做 no-op（muted 已是 true），不会形成循环。
+       注意：退出时必须先摘监听再把 muted 设回 false，顺序反了会被守卫按回去。 */
+    guardMute = function () {
+      try { if (videoEl && !videoEl.muted) videoEl.muted = true; } catch (e) {}
+    };
+    try { videoEl.addEventListener('volumechange', guardMute, true); } catch (e) {}
 
     try { videoEl.muted = true; } catch (e) {}
     enhanced = true;
@@ -377,6 +589,28 @@
       .catch(function () { fallback(); });
   }
 
+  /* Transmuxer 单例：构造一次要初始化整条 demux 管线，直播场景每 2~5 秒一片，
+     每片 new 一个是纯浪费。mux.js 的实例设计上就支持 push/flush 循环使用。
+     事件只绑一次，输出写进 muxOut；一旦 push/flush 抛错就整个重建 ——
+     内部状态可能已经被半片数据污染，续用会错乱。 */
+  let muxer = null;
+  let muxOut = null;
+
+  function getMuxer() {
+    if (muxer) return muxer;
+    try {
+      muxer = new muxjs.mp4.Transmuxer({ keepOriginalTimestamps: true, remux: false });
+      muxer.on('data', function (seg) {
+        if (!muxOut || seg.type !== 'audio') return;
+        if (!capInitDone && seg.initSegment && seg.initSegment.byteLength) muxOut.init = seg.initSegment;
+        if (seg.data && seg.data.byteLength) muxOut.data = seg.data;
+      });
+    } catch (e) {
+      muxer = null;
+    }
+    return muxer;
+  }
+
   /** 调试通道送来一片 ts：demux 出音频轨，灌进 MSE */
   function onSegChunk(msg) {
     if (enhMode !== 'capture' || !enhBuf) return;
@@ -394,17 +628,20 @@
 
     /* remux:false 才会把音轨单独吐出来。默认的 combined 段里含 avc1，
        audio/mp4 的 SourceBuffer 会直接拒收。 */
-    let init = null, data = null;
+    const t = getMuxer();
+    if (!t) return;
+    muxOut = { init: null, data: null };
     try {
-      const t = new muxjs.mp4.Transmuxer({ keepOriginalTimestamps: true, remux: false });
-      t.on('data', function (seg) {
-        if (seg.type !== 'audio') return;
-        if (!capInitDone && seg.initSegment && seg.initSegment.byteLength) init = seg.initSegment;
-        if (seg.data && seg.data.byteLength) data = seg.data;
-      });
       t.push(buf);
       t.flush();
-    } catch (e) { return; }
+    } catch (e) {
+      muxer = null;      /* 状态可能被半片数据污染，重建 */
+      muxOut = null;
+      return;
+    }
+    const init = muxOut && muxOut.init;
+    const data = muxOut && muxOut.data;
+    muxOut = null;
 
     /* init segment 只 append 第一次：同一路流的编码参数不会变，
        重复 append 会让 SourceBuffer 报错。 */
@@ -454,6 +691,9 @@
       if (ui) ui.showToast('这个页面没有找到视频元素');
       return;
     }
+
+    /* 每次重新进双向都给缓冲一次机会：也许这回站点的下载跟得上了 */
+    stallGiveUps = 0;
 
     const kind = pageKind();
     const route = pickRoute(kind);
@@ -508,7 +748,22 @@
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
 
     if (videoEl) {
+      if (guardMute) {
+        try { videoEl.removeEventListener('volumechange', guardMute, true); } catch (e) {}
+        guardMute = null;
+      }
       try { videoEl.muted = false; } catch (e) {}
+      /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
+         必须放开 —— 不然后台一拆，用户的视频就永远停住了 */
+      if (stalledByUs) {
+        stalledByUs = false;
+        stallSince = 0;
+        try { enhAudio.playbackRate = 1; } catch (e) {}
+        try {
+          const p = videoEl.play();
+          if (p && p.catch) p.catch(function () {});
+        } catch (e) {}
+      }
       videoEl = null;
     }
 
@@ -555,7 +810,17 @@
     if (!r) return;
 
     const b = enhAudio.buffered;
-    const ahead = b.length ? Math.max(0, b.end(b.length - 1) - videoEl.currentTime) : 0;
+    const tail = b.length ? b.end(b.length - 1) : 0;
+
+    /* 等缓冲时右侧那截改报「还差多少」——不然用户看到「可提前 0.0s」
+       却不知道画面为什么要停在那儿 */
+    if (stalledByUs) {
+      const lack = Math.max(0, (videoEl.currentTime - currentMs() / 1000) - tail);
+      ui.setRouteMeta('等缓冲 · 还差 ' + lack.toFixed(1) + 's');
+      return;
+    }
+
+    const ahead = b.length ? Math.max(0, tail - videoEl.currentTime) : 0;
     ui.setRouteMeta(r.meta + ' · 可提前 ' + ahead.toFixed(1) + 's');
   }
 
@@ -576,7 +841,12 @@
         mode: enhMode,
         why: routeWhy,
         videoSrc: v ? String(v.currentSrc || v.src || '').slice(0, 80) : null,
-        videoPaused: v ? v.paused : null
+        videoPaused: v ? v.paused : null,
+        /* 停在暂停上是不是扩展自己按的（为了等缓冲），别和用户暂停混了 */
+        delayMs: currentMs(),
+        delayMs: currentMs(),
+        stalled: stalledByUs,
+        bufferedLead: enhAudio ? +bufferedLead(v ? v.currentTime - currentMs() / 1000 : 0).toFixed(2) : null
       });
     } catch (e) {}
   }
@@ -768,6 +1038,9 @@
     },
 
     isEnhanced: function () { return enhanced; },
+    /* 「这条链路是抓切片，且还没放弃」—— 全屏后要重连调试会话，只看 enhanced 不够：
+       连接中（enhMode=capture 但音频还没到手）时掉线同样要接回来 */
+    isCapturing: function () { return enhMode === 'capture'; },
     kind: pageKind,
     pickVideo: pickVideo,
     updateModeUI: updateModeUI,

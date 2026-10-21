@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>隐私政策 · 音画偏移 · 标签页音频</title>
+<title>隐私政策 · 音画不同步调节器</title>
 <style>
   :root {
     --bg: #ffffff; --text: #1c2024; --dim: #5c6770;
@@ -59,8 +59,8 @@
 
 <h1>隐私政策</h1>
 <p class="meta">
-  适用于浏览器扩展 <strong>音画偏移 · 标签页音频</strong>（Audio Delay · Tab Audio）<br>
-  最后更新：2026-10-19
+  适用于浏览器扩展 <strong>音画不同步调节器</strong>（Audio Delay Sync）<br>
+  最后更新：2026-10-21
 </p>
 
 <p class="lede">
@@ -93,12 +93,27 @@
       <td>你拖动的延迟值（0–10000 毫秒）保存在浏览器本地存储 <code>chrome.storage</code> 中，仅用于下次打开面板时恢复上次的数值。<strong>不离开你的设备。</strong></td>
     </tr>
     <tr>
+      <td>已授权站点（可选功能）</td>
+      <td>是</td>
+      <td>只有你在面板上点「启用双向」并同意浏览器授权框后，<strong>那一个站点</strong>的 origin（如 <code>https://example.com</code>）才会记入本地存储 <code>enhancedOrigins</code>，用于下次自动恢复这条可选链路、以及在你撤销授权时清理。不含页面地址、标题、访问时间。不使用双向模式时该记录为空。<strong>不离开你的设备。</strong></td>
+    </tr>
+    <tr>
       <td>当前标签页 ID</td>
       <td>是</td>
       <td>进程内使用，用于把音频流和标签页对应起来。关闭后清除。</td>
     </tr>
     <tr>
-      <td>浏览历史 / URL / 页面内容</td>
+      <td>网页文本 / 图片 / 表单 / 链接</td>
+      <td><strong>否</strong></td>
+      <td>不读取。注入的脚本只读取 <code>&lt;video&gt;</code> 元素的时间属性（当前播放位置、已缓冲范围、音频来源地址）。</td>
+    </tr>
+    <tr>
+      <td>URL 路径 / 查询参数 / 页面标题</td>
+      <td><strong>否</strong></td>
+      <td>不读取。只读取当前页面的 origin（协议 + 域名 + 端口），用于判断该站点是否已被你授权启用可选功能。</td>
+    </tr>
+    <tr>
+      <td>浏览历史</td>
       <td><strong>否</strong></td>
       <td>本扩展没有申请 <code>tabs</code>、<code>history</code>、<code>webNavigation</code> 等权限，技术上无法读取。</td>
     </tr>
@@ -119,7 +134,8 @@
   <li><code>activeTab</code> — 只在你主动点击扩展图标时，才获得当前标签页的临时访问权。不常驻，不跨标签页。</li>
   <li><code>scripting</code> — 在<strong>你已授权的那个标签页</strong>里注入调节面板和失败原因提示。注入失败不影响音频功能。</li>
 </ul>
-<p>本扩展<strong>没有</strong>申请任何 <code>host_permissions</code>，不声明任何特定网站域名，因此无法在后台读取任何网页。</p>
+<p>本扩展<strong>没有</strong>申请常驻的 <code>host_permissions</code>，安装时不获得任何网站访问权。</p>
+<p>manifest 里的 <code>optional_host_permissions: ["*://*/*"]</code> 是 Chromium 对可选权限的固定写法，<strong>它本身不授予任何访问权</strong>。只有你在面板上主动点「启用双向」并确认浏览器的授权框后，这条权限才对<strong>那一个站点</strong>生效；换一个站点会重新询问。你随时可以在浏览器扩展管理页撤销。</p>
 
 <h2>网络请求</h2>
 <p><strong>零。</strong>本扩展不发起任何网络请求，不加载任何远程脚本、字体、图片或统计代码。所有代码和图标都打包在扩展内部，可离线使用。</p>

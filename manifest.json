@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "音画偏移 · 标签页音频",
+  "name": "音画不同步调节器",
   "version": "1.0.0",
   "description": "接管当前标签页的音频输出做实时延迟，修正音画不同步。页面播放器、进度条、画质切换全部不动。",
   "minimum_chrome_version": "116",
@@ -19,7 +19,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "音画偏移 · 点一下接管当前标签页",
+    "default_title": "音画不同步调节器 · 点一下接管当前标签页",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

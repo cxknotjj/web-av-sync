@@ -343,7 +343,7 @@ window.ADS_STYLE = {
     <div class="panel">
       <div class="head">
         <span class="dot"></span>
-        <span class="title">音画偏移</span>
+        <span class="title">音画不同步调节器</span>
         <span class="grow"></span>
         <button class="icon" data-act="collapse" title="收起">−</button>
         <button class="icon" data-act="close" title="停止并关闭">×</button>

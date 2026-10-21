@@ -246,7 +246,7 @@ async function markNeedGesture(tabId) {
 async function clearNeedGesture(tabId) {
   try {
     await chrome.action.setBadgeText({ tabId: tabId, text: '' });
-    await chrome.action.setTitle({ tabId: tabId, title: '音画偏移 · 点一下接管当前标签页' });
+    await chrome.action.setTitle({ tabId: tabId, title: '音画不同步调节器 · 点一下接管当前标签页' });
   } catch (e) {}
 }
 
