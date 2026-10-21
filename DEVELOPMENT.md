@@ -116,7 +116,30 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 | 三条链路各有前提        | **MSE 播放器**（`blob:`）走①，零额外带宽但要授权 + 刷新；**原生 HLS**（`.m3u8`）优先走②，抓不到再退③；**直连 mp4** 只能走③  |
 | 能提前多少取决于缓冲      | 只能提前到「已经下载到」的位置，超出会卡住等数据                                                                                         |
 | 误差几十毫秒          | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20\~70ms                                                                          |
-| 和 tabCapture 的关系 | **不互斥**：进入双向模式只是把主视频静音、改由本地音轨出声，tabCapture 链路保留着（标签页音频此时是静音的）。退出双向时 `videoEl.muted = false`，声音原样回到那条链路，面板数值会被 `syncDelayToSw()` 同步过去，听感上没有断点 |
+| 和 tabCapture 的关系 | **不互斥**：进入双向模式只是把主视频静音、改由本地音轨出声，tabCapture 链路继续留着——而且此时它承载的正是那条本地音轨（所以它的 DelayNode 必须归零，见下一节）。退出双向时 `videoEl.muted = false`，页面声音原样回来 |
+
+### tabCapture 那条链路在双向模式里只能当「管子」
+
+`tabCapture` 抓的是**整个标签页的混音**，并且把标签页本身的输出静音，声音只能由
+offscreen 里的 DelayNode 送去扬声器。而双向模式放进去的那条 `<audio>` 也是页面元素
+——它同样在这个混音里。
+
+所以两条链路的延迟会**叠加**：面板写 1.5 秒，`<audio>` 已经按 1.5 秒排好时间，
+再被 DelayNode 拖 1.5 秒，耳朵听到的是 3 秒。实测确认（`test-env/test-features.js`
+第 5 组）：进双向之前 `delayMs = 1500`，进双向后必须变成 `0`。
+
+修法两条：
+
+- `enhReady()` 里 `bypassCaptureDelay()`：给 SW 发 `{type:'setDelay', delayMs:0,
+  transient:true}`，把 DelayNode 清零
+- `exitEnhanced()` / `enhFail()` 里 `syncDelayToSw(true)`：把面板值还原回去
+
+**`transient: true` 是必须的**：`background.setDelay()` 默认会把值写进
+`lastDelayMs`（下次接管沿用）。那个临时 0 不该覆盖用户调好的延迟，所以带 transient
+的调用只改 DelayNode、不落盘。
+
+副作用是好的：DelayNode 归零后，面板上那个电平条量的就是双向模式下真实的输出电平，
+不会再是一根躺平的线。
 
 ### 缓冲跟不上提前量时：按住画面等下载
 

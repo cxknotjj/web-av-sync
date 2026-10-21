@@ -176,12 +176,19 @@ async function stopAudio() {
   await closeOffscreen();
 }
 
-async function setDelay(delayMs) {
+/**
+ * persist: 是否把这次的值记成「下次接管沿用」。默认 true。
+ * 双向模式把 tabCapture 那条链路当纯管子用（delayNode 要归零），
+ * 那个 0 只是临时的，不能覆盖用户调好的延迟。
+ */
+async function setDelay(delayMs, persist) {
   await stateReady;
   if (!(await hasOffscreen())) return { ok: false, error: '尚未接管' };
   try {
     const res = await toOffscreen('audio-setDelay', { delayMs: delayMs });
-    if (res && res.ok) saveDelay(res.delayMs != null ? res.delayMs : delayMs);
+    if (res && res.ok && persist !== false) {
+      saveDelay(res.delayMs != null ? res.delayMs : delayMs);
+    }
     return res;
   } catch (e) {
     return { ok: false, error: readableError(e) };
@@ -378,7 +385,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       stop().then(sendResponse);
       return true;
     case 'setDelay':
-      setDelay(msg.delayMs).then(sendResponse);
+      setDelay(msg.delayMs, msg.transient !== true).then(sendResponse);
       return true;
     case 'getState':
       getState().then(sendResponse);

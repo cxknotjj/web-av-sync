@@ -437,11 +437,28 @@
   /** 把面板上的数值同步给 tabCapture 那条链路。
    *  双向期间 queueDelay 是直接 return 的（数值只作用于本地音轨），
    *  所以 offscreen 里的 delayNode 还停在进入双向之前的值。退出时面板可能
-   *  被钳制过（负值归零），不同步的话听起来仍是一个旧延迟。 */
-  function syncDelayToSw() {
+   *  被钳制过（负值归零），不同步的话听起来仍是一个旧延迟。
+   *  transient：只改这一次的 delayNode，不覆盖用户记住的延迟值。 */
+  function syncDelayToSw(transient) {
     try {
-      chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: currentMs() })
-        .catch(function () {});
+      chrome.runtime.sendMessage({
+        target: 'sw',
+        type: 'setDelay',
+        delayMs: currentMs(),
+        transient: !!transient
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  /** 双向模式期间，tabCapture 那条链路只当「送到扬声器的管子」用。
+   *  它抓的是整个标签页的混音 —— 包括我们刚放进来、已经按面板值排好时间的
+   *  那条 <audio>。所以 delayNode 必须归零，否则面板写 1.5 秒、耳朵听到 3 秒。
+   *  退出时 syncDelayToSw() 会把面板值还原回去。 */
+  function bypassCaptureDelay() {
+    try {
+      chrome.runtime.sendMessage({
+        target: 'sw', type: 'setDelay', delayMs: 0, transient: true
+      }).catch(function () {});
     } catch (e) {}
   }
 
@@ -500,7 +517,7 @@
 
     updateModeUI();
     if (msg && ui) ui.showToast(msg);
-    syncDelayToSw();
+    syncDelayToSw(true);
     if (typeof then === 'function') then();
   }
 
@@ -520,6 +537,9 @@
 
     try { videoEl.muted = true; } catch (e) {}
     enhanced = true;
+
+    /* 管子清零：这条链路的 delayNode 不能和本地音轨的偏移叠加 */
+    bypassCaptureDelay();
 
     if (ui) {
       ui.setEnhanced(true);
@@ -802,7 +822,7 @@
       ui.setEnhanced(false);
     }
     updateModeUI();
-    syncDelayToSw();
+    syncDelayToSw(true);
   }
 
   /* ---------------- 模式文案 ---------------- */
