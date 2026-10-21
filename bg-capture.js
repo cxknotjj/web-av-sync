@@ -112,6 +112,7 @@ async function captureTake(rec, requestId) {
     target: 'content',
     type: 'seg',
     url: rec.url,
+    at: rec.at || 0,
     b64: r.base64Encoded ? r.body : null,
     text: r.base64Encoded ? null : r.body
   };
@@ -162,7 +163,10 @@ if (chrome.debugger && chrome.debugger.onEvent) {
         return;
       }
       if (!capPending.size) capDiag(tabId, 'hit:' + String(url).split('/').pop().slice(0, 20));
-      capPending.set(params.requestId, { url: url, tabId: tabId });
+      /* at 是「这个请求什么时候发出去的」（SW 的墙钟）。页面那边拖进度条时
+         记下时刻，用它把 seek 之前发出的切片挡掉 —— 那些字节属于用户已经
+         跳过的那一段，再 append 只会白占缓冲。 */
+      capPending.set(params.requestId, { url: url, tabId: tabId, at: Date.now() });
       return;
     }
 

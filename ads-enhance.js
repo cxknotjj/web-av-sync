@@ -89,6 +89,18 @@
   let stallTailAt = 0;        /* 缓冲最后一次增长的时刻 */
   let stallLead = -999;       /* 进等待时「目标位置离可播数据还差多少」 */
   let lastStallToast = 0;     /* 上次「等缓冲」toast 的时间，做冷却用 */
+
+  /* 用户拖进度条。视频的 currentTime 会瞬间跳到新位置，而我们这条音频还停在
+     旧位置、MSE 里还攒着旧位置的片段、appendQueue 里还排着旧位置的队列。
+     不在这里一次性纠正的话会有两个后果：
+       1. 画面在新位置走，声音还在旧位置 —— 完全对不上；
+       2. 队列里的旧片段继续灌进 MSE，把用户刚跳过的整段都缓冲下来。
+     seekAt 记下时刻，用来把「seek 之前发出的切片请求」挡在门外 ——
+     那些字节属于已经跳过的那一段。 */
+  let seekAt = 0;
+  let seekHandler = null;
+  let trimBusy = false;
+  const KEEP_BEHIND = 3;      /* 播放位置之前留几秒缓冲（够回退一点就行） */
   /* 已经因为等不到而自动降档几次。降过一次还不够的，第二次直接归零 ——
      否则会「降一点、再卡四秒、再降一点」，比一直卡着还难受。 */
   let stallGiveUps = 0;
@@ -97,7 +109,8 @@
                                  否则一放开走两步又得按住，声音就是一顿一顿的 */
   const DRIFT_SEEK = 0.35;    /* 音频位置偏差超过这个才 seek，小偏差用倍速慢慢追 */
   const WAIT_STUCK_MS = 4000; /* 缓冲连续这么久一点没长 = 真下不来了，别等了 */
-  const WAIT_MAX_MS = 30000;  /* 总等待上限，防止在一个永远长不起来的站上干等 */
+  const WAIT_MAX_MS = 15000;  /* 总等待上限。目标位置迟迟没有数据时，等 15 秒
+                                 还没到就认了 —— 再久用户只会觉得播放器坏了 */
 
   /* ---------------- 页面探测 ----------------
    * pickVideo / pageKind 拆到了 ads-detect.js（纯函数，全屏感知 + mpd 识别），
@@ -253,7 +266,7 @@
 
     if (abs > DRIFT_SEEK) {
       try { enhAudio.playbackRate = 1; } catch (e) {}
-      try { enhAudio.currentTime = want; } catch (e) {}
+      seekAudioTo(want);
       return;
     }
 
@@ -275,6 +288,96 @@
     if (!enhAudio) return 0;
     const b = enhAudio.buffered;
     return b.length ? b.end(b.length - 1) : 0;
+  }
+
+  /* ---------------- 拖动进度条 ---------------- */
+
+  /** MSE 的 duration 只跟着已 append 的数据长，而且 **seek 会被 duration 钳住**：
+   *  缓冲只到 20 秒时把 currentTime 设成 40，浏览器会直接把它改成 20 ——
+   *  音频于是永远停在旧位置，画面已经在新位置了。这就是「拖完进度条之后
+   *  声音对不上」最直接的那个原因。
+   *  解决：目标位置超出 duration 时先把它抬上去，再 seek。 */
+  function ensureSeekRange(want) {
+    if (!enhMS || enhMS.readyState !== 'open') return;
+    let cur;
+    try { cur = enhMS.duration; } catch (e) { return; }
+    if (!isFinite(cur)) return;          /* NaN / Infinity 都不用管 */
+    if (want + 5 <= cur) return;         /* 本来就在范围里 */
+    try {
+      enhMS.duration = Math.max(want + 60, cur + 1);
+    } catch (e) {}
+  }
+
+  /** 统一从这里 seek 音频。
+   *
+   *  判断「能不能 seek」必须看 buffered，不能看 seekable —— 实测缓冲只有
+   *  10.36~15.56 时 seekable 会报 0~15.56，中间那一段其实是空的。seek 进
+   *  空洞不会报错，而是**永久停在 seeking 上**：之后所有校正都被
+   *  `if (!enhAudio.seeking)` 挡住，音频从此不动，画面照走。
+   *  宁可这次不 seek，等数据 append 进来下一拍再纠正。 */
+  function seekAudioTo(t) {
+    if (!enhAudio) return;
+    ensureSeekRange(t);
+    if (!bufferedHas(t)) return;
+    try { enhAudio.currentTime = t; } catch (e) {}
+  }
+
+  /** 用户把画面拖到新位置时，音频必须立刻跟过去。
+   *  只靠 250ms 一拍的 syncTick 跟的话，中间那几拍画面在走、声音还是旧的，
+   *  听感就是「拖完之后声音对不上」。更糟的是旧位置的片段还在队列里，
+   *  会继续被 append 进 MSE，把用户刚跳过的那一整段都缓冲下来。 */
+  function onVideoSeek() {
+    if (!enhanced || !videoEl || !enhAudio) return;
+    seekAt = Date.now();
+
+    /* 旧位置的待 append 片段全丢 —— 它们属于用户已经跳过的那一段。
+       不清的话 pump 会一片一片塞进去，正是「强制缓存跳过内容」的来源。 */
+    appendQueue.length = 0;
+
+    const want = videoEl.currentTime - currentMs() / 1000;
+    try { enhAudio.playbackRate = 1; } catch (e) {}
+    /* 位置先摆到正确的地方。没缓冲到时 seekAudioTo 会跳过 —— 硬 seek 要么
+       被钳回缓冲末尾，要么卡在 seekable 与 buffered 之间的空洞里、从此不再
+       接受校正。数据 append 进来后下一拍会自动纠正。 */
+    seekAudioTo(want);
+
+    /* 等待基准整体换成新位置：stallSince / stallTail 还是旧位置的，
+       继续用会把「刚跳过来的等待」算成「已经等了很久」，几秒后误降档。 */
+    if (stalledByUs) {
+      stallSince = Date.now();
+      stallTail = bufferedEnd();
+      stallTailAt = stallSince;
+      stallLead = bufferedLead(want);
+      stallGiveUps = 0;
+    }
+
+    trimBuffer();
+    publishState();
+  }
+
+  /** 删掉播放位置之前、已经不可能再播到的 MSE 缓冲。
+   *  MSE 不回收自己：append 进去的数据一直占着，除非显式 remove。
+   *  每拖一次进度条就留下一段永远不播的区间，一部电影下来能攒下整条音轨。 */
+  function trimBuffer() {
+    if (!enhBuf || !enhMS || enhMS.readyState !== 'open') return;
+    if (enhBuf.updating || trimBusy) return;
+    if (!enhAudio) return;
+
+    let b;
+    try { b = enhAudio.buffered; } catch (e) { return; }
+    if (!b.length) return;
+
+    const keepFrom = enhAudio.currentTime - KEEP_BEHIND;
+    const firstStart = b.start(0);
+    /* 少于 1 秒不值得动一次：remove 会打断 append 的节奏 */
+    if (keepFrom - firstStart < 1) return;
+
+    try {
+      trimBusy = true;
+      enhBuf.remove(firstStart, keepFrom);
+    } catch (e) {
+      trimBusy = false;
+    }
   }
 
   /** 按住画面等缓冲 */
@@ -336,8 +439,13 @@
     /* 已经没什么可降的了：音频在这一段就是没下载下来（往回拖得太远、
        或者站点把流切走了）。再放开画面只会「停一会儿、动半秒」地循环，
        不如老实退回原声 —— 至少画面和声音都是用户熟悉的那一份。 */
-    if (target === currentMs()) {
-      enhFail('这个位置一直没缓冲到音频，已退出双向模式，声音回到页面原声。');
+    /* 降完提前量，目标位置仍然落在缓冲之外 —— 说明这段音频根本没下载下来
+       （用户跳得太远，或者站点把流切走了）。这时候放开画面就是「画面在走、
+       声音没有」，而且下一拍还会再 stall，变成规律的卡顿循环。
+       老实退回页面原声，至少声画是配套的。 */
+    const afterGiveUp = bufferedLead(videoEl.currentTime - target / 1000);
+    if (target === currentMs() || afterGiveUp < -WAIT_GAP) {
+      enhFail('这个位置的音频还没下载到，已退出双向模式，声音回到页面原声。');
       return;
     }
 
@@ -371,6 +479,8 @@
   function syncTick() {
     if (!enhanced || !videoEl || !enhAudio) return;
     pump();
+    /* 回收播放位置之前的缓冲：MSE 不会自己释放，不删就一路攒着 */
+    trimBuffer();
     /* 顺手把「还能提前多少」刷到面板上 */
     paintRouteMeta();
 
@@ -380,10 +490,27 @@
     if (stalledByUs) {
       const need = videoEl.currentTime - currentMs() / 1000;
       const lead = bufferedLead(need);
-      if (lead >= RESUME_LEAD) {
+      /* 缓冲已经到顶（后面不会再有数据）：剩下这点余量就是全部本钱，
+         不能因为差零点几秒达不到 RESUME_LEAD 就一直按着 —— 那会一路等到
+         「卡死」超时，然后把提前量清掉甚至直接退出双向。
+         判据是末尾连续 2 秒没长，正常下载中不会触发。 */
+      const tailStuck = Date.now() - stallTailAt > 2000;
+      if (lead >= RESUME_LEAD || (lead > WAIT_GAP && tailStuck)) {
         alignAudio(need);
         resumeNow();
         return;
+      }
+
+      /* 等待期间必须一直按着画面。stallNow 只在第一次调用时 pause，
+         而用户拖完进度条后很多播放器会自己接着播 —— 视频在走、音频还停在
+         旧位置，正是「拖完之后声音对不上」的样子。 */
+      try { if (!videoEl.paused) videoEl.pause(); } catch (e) {}
+      try { if (!enhAudio.paused) enhAudio.pause(); } catch (e) {}
+      /* 顺带把音频摆到目标位置等着。数据还没到的话 seekable 里没有这一段，
+         seekAudioTo 会跳过（硬 seek 只会被钳回一个错的位置），
+         等切片 append 进来后由 alignAudio 纠正。 */
+      if (Math.abs(enhAudio.currentTime - need) > 1) {
+        seekAudioTo(need);
       }
 
       /* 「还在下载」有两种长相：缓冲末尾在往前长（正常前进），或者目标位置
@@ -400,7 +527,14 @@
       }
       const stuck = Date.now() - stallTailAt > WAIT_STUCK_MS;
       const tooLong = Date.now() - stallSince > WAIT_MAX_MS;
-      if (stuck || tooLong) { giveUpWait(); return; }
+      /* 目标位置整个落在缓冲之外 = 在等「新位置」的切片。这种情况降提前量
+         一点用都没有（降了也播不到那儿），只会把画面放开、声音留在原地。
+         所以宁可多等一会儿，面板上「还差 N 秒」在动，用户看得见。
+         例外：末尾连续 6 秒没长 —— 那是真的到片尾/断流了，再等也没有，
+         交给 giveUpWait 去降档（它还会再确认一次降完有没有数据）。 */
+      const noDataAtTarget = lead < -WAIT_GAP;
+      const atStreamEnd = Date.now() - stallTailAt > WAIT_STUCK_MS * 1.5;
+      if (tooLong || (stuck && (!noDataAtTarget || atStreamEnd))) { giveUpWait(); return; }
 
       paintRouteMeta();
       return;
@@ -426,7 +560,7 @@
 
     /* 只差一丁点（网络抖一下）：原地等下一拍，别 seek，也别停画面 */
     if (Math.abs(enhAudio.currentTime - want) > 2.5) {
-      try { enhAudio.currentTime = want; } catch (e) {}
+      seekAudioTo(want);
     }
   }
 
@@ -488,6 +622,8 @@
     appendQueue = [];
     capInitDone = false;
     capBytes = 0;
+    seekAt = 0;
+    trimBusy = false;
     enhMode = '';
     enhanced = false;
 
@@ -495,6 +631,10 @@
       if (guardMute) {
         try { videoEl.removeEventListener('volumechange', guardMute, true); } catch (e) {}
         guardMute = null;
+      }
+      if (seekHandler) {
+        try { videoEl.removeEventListener('seeking', seekHandler, true); } catch (e) {}
+        seekHandler = null;
       }
       try { videoEl.muted = false; } catch (e) {}
       /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
@@ -537,6 +677,11 @@
 
     try { videoEl.muted = true; } catch (e) {}
     enhanced = true;
+
+    /* 拖进度条要在第一时间纠正音频位置、丢掉旧位置的队列。
+       等 250ms 一拍的 tick 去发现，中间那几拍已经声画不同步了。 */
+    seekHandler = onVideoSeek;
+    try { videoEl.addEventListener('seeking', seekHandler, true); } catch (e) {}
 
     /* 管子清零：这条链路的 delayNode 不能和本地音轨的偏移叠加 */
     bypassCaptureDelay();
@@ -584,7 +729,7 @@
     enhMS.addEventListener('sourceopen', function () {
       try {
         enhBuf = enhMS.addSourceBuffer(audioMime || 'audio/mp4; codecs="mp4a.40.2"');
-        enhBuf.addEventListener('updateend', pump);
+        enhBuf.addEventListener('updateend', function () { trimBusy = false; pump(); });
         for (const c of chunks) appendQueue.push(c);
         pump();
       } catch (e) {
@@ -627,7 +772,7 @@
     enhMS.addEventListener('sourceopen', function () {
       try {
         enhBuf = enhMS.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-        enhBuf.addEventListener('updateend', pump);
+        enhBuf.addEventListener('updateend', function () { trimBusy = false; pump(); });
       } catch (e) {
         fallback();
       }
@@ -663,6 +808,11 @@
   /** 调试通道送来一片 ts：demux 出音频轨，灌进 MSE */
   function onSegChunk(msg) {
     if (enhMode !== 'capture' || !enhBuf) return;
+
+    /* seek 之前发出的切片请求：那些字节属于用户已经跳过的那一段，
+       再 append 进来只会白占 MSE 缓冲（「强制缓存跳过内容」的另一半来源）。
+       30ms 容差留给同一毫秒的边界。 */
+    if (seekAt && msg.at && msg.at < seekAt - 30) return;
 
     let buf = null;
     try {
@@ -791,6 +941,8 @@
     appendQueue = [];
     capInitDone = false;
     capBytes = 0;
+    seekAt = 0;
+    trimBusy = false;
 
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
 
@@ -798,6 +950,10 @@
       if (guardMute) {
         try { videoEl.removeEventListener('volumechange', guardMute, true); } catch (e) {}
         guardMute = null;
+      }
+      if (seekHandler) {
+        try { videoEl.removeEventListener('seeking', seekHandler, true); } catch (e) {}
+        seekHandler = null;
       }
       try { videoEl.muted = false; } catch (e) {}
       /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
@@ -866,10 +1022,12 @@
        却不知道画面为什么要停在那儿 */
     if (stalledByUs) {
       const lead = bufferedLead(videoEl.currentTime - currentMs() / 1000);
-      /* -999 是「一段缓冲都没有」的哨兵值，别拿它算成「还差 999 秒」 */
-      ui.setRouteMeta(lead <= -900
-        ? '等缓冲 · 下载中…'
-        : '等缓冲 · 还差 ' + Math.max(0, -lead).toFixed(1) + 's');
+      /* -999 是「一段缓冲都没有」的哨兵值，别拿它算成「还差 999 秒」。
+         lead 为正 = 数据其实已经够播到目标位置，只是余量还没到 RESUME_LEAD，
+         这时候写「还差 0.0s」会让人以为卡死了。 */
+      if (lead <= -900) ui.setRouteMeta('等缓冲 · 下载中…');
+      else if (lead > 0) ui.setRouteMeta('等缓冲 · 数据已到，准备恢复');
+      else ui.setRouteMeta('等缓冲 · 还差 ' + (-lead).toFixed(1) + 's');
       return;
     }
 
