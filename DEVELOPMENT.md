@@ -478,6 +478,22 @@ node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 
 
 > ⚠ `getMediaStreamId` 校验的是「扩展是否被用户在**当前页面**调用过」，CDP 的 `Runtime.evaluate` 即使带 `userGesture: true` 也不算。所以**捕获这一步无法自动化**，必须真人点一次工具栏图标。这一点没有绕过方式，是 activeTab 的安全边界。
 
+### 远程仓库
+
+| 远程 | 地址 | 说明 |
+|---|---|---|
+| `origin` | `gitee.com/the-chicken-god-comes/AudioDelaySync` | 主仓，`master` 默认追踪它，裸 `git push` 推这里 |
+| `github` | `github.com/cxknotjj/web-av-sync` | GitHub 镜像，用于对外分发 |
+
+两个一起推：
+
+```bash
+git pushall        # 配置在 .git/config 的别名，等价于 origin + github 各推一次
+```
+
+> 别名只存在于本机 `.git/config`，克隆出来的仓库没有。换机器时补一条：
+> `git config alias.pushall '!git push origin master && git push github master'`
+
 ***
 
 ## 发布到 Edge 加载项商店
