@@ -437,6 +437,34 @@ if (document.documentElement.dataset.adsHooked === '1') {
 | **一次只能捕获一个标签页**        | 浏览器限制，同一标签页也只能被一路捕获。                                              |
 | **接管后原播放器会静音**         | 页面上的音量条看起来正常但没声音，这是预期行为。                                          |
 
+### 快捷键（2026-10-21）
+
+**用 `_execute_action` 而不是自定义命令。** `manifest.json` 的 `commands` 里只注册
+了 `_execute_action`（Alt+Shift+D）：它是浏览器预留的特殊命令，触发时既授予 `activeTab`
+又直接走 `chrome.action.onClicked`，和点图标完全同一条路径 —— `background.js` 里**没有
+任何 onCommand 代码**。如果换成自定义命令走 `onCommand`，activeTab 的授予行为在文档里
+描述得含糊，没必要冒险。
+
+三个实测结论（Edge 151）：
+
+- **`_execute_action` 里不要写 `description` 字段。** 写了整条被忽略。
+- **`chrome.commands.getAll().shortcut` 在 `--load-extension` 下恒为空串，不可信。**
+  别拿它判断快捷键有没有注册 —— 快捷键照样能触发（CDP 派发键位实测有效）。
+- **`Alt+Shift+A` 不触发，`Alt+Shift+D` 触发。** 其余条件完全相同，只换键位做的
+  对照实验 —— A 被 Edge 浏览器层拦截了。选默认键避开它；用户可以在
+  `edge://extensions/shortcuts` 里自己改。
+
+**已知偶发（2026-10-21，Edge 151 + `--load-extension`）：加速键触发后
+activeTab 的授子时有时无。** 表现是音频流接管成功（offscreen 出声）但面板注入
+被拒（`Cannot access contents of the page...`），图标角标闪 `!`。同一份代码、
+同一套测试脚本，一天内既多次全程通过、也多次连续失败，与代码改动无相关性；
+图标点击路径不受影响（activeTab 授子是图标路径的核心机制，久经考验）。
+自动化测试里把它当 best-effort 处理（见 `test-env/test-features.js`），
+商店安装后的表现需要真机确认。
+
+用 CDP 做端到端测试时，`Input.dispatchKeyEvent` 的键位必须和 manifest 里的
+`suggested_key` 一致，否则不触发（见 `test-env/test-features.js`）。
+
 ***
 
 ## 文件

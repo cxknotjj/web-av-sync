@@ -14,13 +14,16 @@
   const U = window.ADS && window.ADS.ui;
   const E = window.ADS && window.ADS.enh;
 
-  /* 重复注入时直接复用，避免叠出好几个面板 */
   if (!U || !E) return;
-  if (window.__adsWired) {
-    try { U.reveal(); } catch (e) {}
-    return;
-  }
-  window.__adsWired = true;
+
+  /* 重复注入（停止后再点图标重新接管）：ads-ui / ads-enhance 每次注入都会
+     跑一遍、换上新实例，content.js 也必须完整重跑给新实例接线 —— 只做早退的
+     话新面板会出现但没人绑事件，「启用双向」按钮永远藏着。
+     旧面板在 teardown 里已销毁，这里保险起见再清一次残留。 */
+  try {
+    const stalePanel = document.getElementById('audio-delay-sync-panel');
+    if (stalePanel) stalePanel.remove();
+  } catch (e) {}
 
   function teardown() {
     try { if (E.isEnhanced()) E.exit(); } catch (e) {}

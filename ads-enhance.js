@@ -86,6 +86,7 @@
   let stallSince = 0;
   let stallTail = 0;          /* 进等待时的缓冲末尾，用来判断「还在不在下载」 */
   let stallTailAt = 0;        /* 缓冲最后一次增长的时刻 */
+  let lastStallToast = 0;     /* 上次「等缓冲」toast 的时间，做冷却用 */
   /* 已经因为等不到而自动降档几次。降过一次还不够的，第二次直接归零 ——
      否则会「降一点、再卡四秒、再降一点」，比一直卡着还难受。 */
   let stallGiveUps = 0;
@@ -294,6 +295,12 @@
       stallSince = Date.now();
       stallTail = bufferedEnd();
       stallTailAt = stallSince;
+      /* 全屏时面板多半被收起，画面突然停住得有句话解释，不然像卡死了。
+         一次等待只弹一条，且 20 秒冷却 —— 网络差导致连环等待时不刷屏。 */
+      if (ui && Date.now() - lastStallToast > 20000) {
+        lastStallToast = Date.now();
+        ui.showToast('缓冲跟不上提前量，画面暂停等待下载…');
+      }
       publishState();
     }
     try { enhAudio.playbackRate = 1; } catch (e) {}
@@ -843,7 +850,6 @@
         videoSrc: v ? String(v.currentSrc || v.src || '').slice(0, 80) : null,
         videoPaused: v ? v.paused : null,
         /* 停在暂停上是不是扩展自己按的（为了等缓冲），别和用户暂停混了 */
-        delayMs: currentMs(),
         delayMs: currentMs(),
         stalled: stalledByUs,
         bufferedLead: enhAudio ? +bufferedLead(v ? v.currentTime - currentMs() / 1000 : 0).toFixed(2) : null
