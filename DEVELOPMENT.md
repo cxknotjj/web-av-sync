@@ -454,13 +454,19 @@ if (document.documentElement.dataset.adsHooked === '1') {
   对照实验 —— A 被 Edge 浏览器层拦截了。选默认键避开它；用户可以在
   `edge://extensions/shortcuts` 里自己改。
 
-**已知偶发（2026-10-21，Edge 151 + `--load-extension`）：加速键触发后
-activeTab 的授子时有时无。** 表现是音频流接管成功（offscreen 出声）但面板注入
-被拒（`Cannot access contents of the page...`），图标角标闪 `!`。同一份代码、
-同一套测试脚本，一天内既多次全程通过、也多次连续失败，与代码改动无相关性；
-图标点击路径不受影响（activeTab 授子是图标路径的核心机制，久经考验）。
-自动化测试里把它当 best-effort 处理（见 `test-env/test-features.js`），
-商店安装后的表现需要真机确认。
+**注入失败排查要点（2026-10-21 踩过两回）：**
+
+- **先看标签页是不是错误页。** `executeScript` 报 `Frame with ID 0 is showing error page`
+  说明测试服务器没起来或页面加载失败 —— 此时音频流照样能「接管成功」（静音流），
+  表现成「start ok 但没有面板」，极易误判成扩展 bug。先用 curl 确认服务 200。
+- **`content.js` 清理残留面板只能删别的实例。** ads-ui 在模块加载时就把新面板挂上了，
+  content.js 在它之后执行，`getElementById` 拿到的是刚建好的新面板；直接 remove
+  会让面板永远不出现（reveal 只改 display，不会重新 append）。正确写法是
+  `el !== U.host` 才删。
+
+**加速键本身可靠**：强制 Edge 到前台后，CDP 派发 `Alt+Shift+D` 每次都触发
+（`chrome.tabs.get` 能读到 url，说明 activeTab 也授了）。之前怀疑的「偶发失灵」
+是上面两个问题叠加造成的误判。
 
 用 CDP 做端到端测试时，`Input.dispatchKeyEvent` 的键位必须和 manifest 里的
 `suggested_key` 一致，否则不触发（见 `test-env/test-features.js`）。
