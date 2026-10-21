@@ -7,7 +7,7 @@
  * 这个函数决定「要不要按住画面等缓冲」，改错一个符号就会表现成
  * 「画面永远卡住」或者「声音没了画面还在走」，但都不报错，只能靠断言兜住。
  *
- * 直接从 ads-enhance.js 里抽出函数体，在一个只提供 enhAudio 的沙箱里跑 ——
+ * 直接从 ads-enh-core.js 里抽出函数体，在一个只提供 enhAudio 的沙箱里跑 ——
  * 不复制逻辑，测的和跑的永远是同一份。
  */
 
@@ -16,7 +16,9 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
-const SRC = fs.readFileSync(path.join(ROOT, 'ads-enhance.js'), 'utf8');
+/* 2026-10-21 拆分后 bufferedLead 住在 core 里（状态都收进了 S 对象） */
+const SRC = fs.readFileSync(path.join(ROOT, 'ads-enh-core.js'), 'utf8')
+  .replace(/\bS\.enhAudio\b/g, 'enhAudio');
 
 function extract(name) {
   const head = 'function ' + name + '(';

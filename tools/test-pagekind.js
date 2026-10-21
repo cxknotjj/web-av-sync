@@ -6,8 +6,8 @@
  * 判错会让人以为站点不支持，而实际只是还没加载 —— 所以六个分支逐个核对。
  *
  * 直接从源码里抽出函数体来跑，不复制逻辑，避免测的和跑的不是同一份。
- * pageKind / pickVideo 在 ads-detect.js（2026-10-21 拆出），pickRoute / captureEnabled
- * 仍在 ads-enhance.js。
+ * pageKind / pickVideo 在 ads-detect.js，pickRoute / captureEnabled 在
+ * ads-enh-core.js（2026-10-21 拆分后，链路判断和缓冲工具一起归到了 core）。
  */
 
 const fs = require('fs');
@@ -16,7 +16,7 @@ const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
 const DETECT_SRC = fs.readFileSync(path.join(ROOT, 'ads-detect.js'), 'utf8');
-const ENH_SRC = fs.readFileSync(path.join(ROOT, 'ads-enhance.js'), 'utf8');
+const ENH_SRC = fs.readFileSync(path.join(ROOT, 'ads-enh-core.js'), 'utf8');
 
 /** 从源码里按函数名截出完整定义（按花括号配平，不依赖缩进） */
 function extract(src, name) {
@@ -110,11 +110,10 @@ check('blob 仍判 mse', run(fakeVideo({ currentSrc: 'blob:https://a.com/x' }), 
 const PICK_ROUTE = extract(ENH_SRC, 'pickRoute');
 const CAPTURE_ENABLED = extract(ENH_SRC, 'captureEnabled');
 
-/** hookReady / chunks / muxjs 在真身里是闭包变量，这里作为全局注入即可 */
+/** hookReady / chunks 在真身里是 S 上的字段，这里给个最小状态对象即可 */
 function runRoute(kindName, build, hook, chunkCount) {
   const ctx = vm.createContext({
-    hookReady: !!hook,
-    chunks: new Array(chunkCount || 0),
+    S: { hookReady: !!hook, chunks: new Array(chunkCount || 0) },
     muxjs: {}
   });
   vm.runInContext(CAPTURE_ENABLED + '\n' + PICK_ROUTE + '\nthis.pickRoute = pickRoute;', ctx);

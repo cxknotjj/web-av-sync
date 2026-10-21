@@ -10,10 +10,17 @@
 const ENHANCED_IDS = ['ads-main', 'ads-content'];
 
 /** 内容脚本的注入顺序。build-info.js 必须第一个：后面几个都要读 ADS_BUILD。
+ *  双向模式那五块也必须按依赖顺序排：它们加载时会直接解构上一个模块导出的
+ *  函数，顺序错了拿到的是 undefined，而且要到用户点按钮才报错。
  *  mux.min.js 只服务链路②，上架版整个文件不进包，这里也就不能列它的名字 ——
  *  registerContentScripts 遇到不存在的文件会整条抛错，结果是面板根本不注入。 */
 function contentScriptFiles() {
-  const files = ['build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-detect.js', 'ads-enhance.js'];
+  const files = [
+    'build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-detect.js',
+    /* core → panel → route → sync → enhance：单向依赖，没有回头箭头 */
+    'ads-enh-core.js', 'ads-enh-panel.js', 'ads-enh-route.js',
+    'ads-enh-sync.js', 'ads-enhance.js'
+  ];
   if (!(globalThis.ADS_BUILD && globalThis.ADS_BUILD.capture === false)) files.push('mux.min.js');
   return files.concat(['content.js']);
 }

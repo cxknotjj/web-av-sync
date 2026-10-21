@@ -107,7 +107,7 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 
 降级那一刻还会弹一次提示，因为这时候用户的流量会翻倍，不能只写在悬停里让人自己发现。
 
-三条链路的编号、名称、代价写在 `ads-enhance.js` 顶部的 `ROUTES` 表里，加链路只要往表里添一条；而「这次会走哪条」由 `pickRoute()` 统一判断，UI 预告和真正分派共用它，避免出现「预告说走①、实际跑③」。
+三条链路的编号、名称、代价写在 `ads-enh-core.js` 顶部的 `ROUTES` 表里，加链路只要往表里添一条；而「这次会走哪条」由 `pickRoute()` 统一判断，UI 预告和真正分派共用它，避免出现「预告说走①、实际跑③」。
 
 ### 限制
 
@@ -442,12 +442,15 @@ if (document.documentElement.dataset.adsHooked === '1') {
 ### 重复注入：每次接管都要把上一份的监听器收掉
 
 同一个文档会被注入不止一次：点图标 → 停止 → 再点图标、`notifyError` 之后重新接管、
-导航完成后的补注入，都是往同一个页面里**再跑一遍**这五个文件。
+导航完成后的补注入，都是往同一个页面里**再跑一遍**这几个文件。
 
-- `ads-ui.js` / `ads-enhance.js` 有 `window.ADS.xxx` 守卫，第二份会直接 return，
-  所以面板和状态机只有一个实例；`ads-enhance` 的 `init()` 也因此必须自己防重
-  （`inited` 标记）—— 它会被反复调用，而 `window.addEventListener('message')`
-  每调一次就多一条，`seg` / `chunk` 会被处理 N 次、MSE 片段被重复 append。
+- 双向模式拆成了五块（core → panel → route → sync → enhance）。**每一块都必须
+  自己挡**：`if (E.core) return;` 这样的守卫缺一个，重复注入就会重建 `S`，
+  正在跑的 `syncTimer` 引用丢了、旧的停不掉新的又起一个，表现是两路音频同时出声。
+  入口 `ads-enhance.js` 额外用 `window.ADS.enh` 挡，因为对外接口只能有一个。
+  `init()` 也必须自己防重（`inited` 标记）—— 它会被反复调用，而
+  `window.addEventListener('message')` 每调一次就多一条，`seg` / `chunk` 会被
+  处理 N 次、MSE 片段被重复 append。
 - `content.js` **没有**守卫（上一版就是靠它早退，结果新面板没人接线），所以它每次
   都是新 IIFE。它的 `chrome.runtime.onMessage` 监听器必须由下一份主动摘掉：
   文件开头调 `window.__adsContentTeardown()`，把上一份的监听器和定时器收掉。
@@ -572,7 +575,11 @@ offscreen.html/js  音频处理：getUserMedia → DelayNode → destination
 ads-template.js    面板与提示的样式、结构模板（纯字符串，不碰 DOM）
 ads-ui.js          面板、提示条、滑块/滚轮/键盘/拖动/全屏跟随 → window.ADS.ui
 ads-detect.js      页面检测：挑 video（全屏感知）、判断播放方式 → window.ADS.detect
-ads-enhance.js     双向模式三条链路 + 同步循环 → window.ADS.enh
+ads-enh-core.js    双向模式底座：共享状态 S、常量 C、缓冲几何、音频对齐、链路选择
+ads-enh-panel.js   面板文案：链路指示条、可提前几秒、按钮状态 → window.ADS.E.panel
+ads-enh-route.js   三条链路的实现：复用 MSE / 抓切片 / 再拉一路 → window.ADS.E.route
+ads-enh-sync.js    同步循环：250ms 一拍的对齐、等缓冲、拖进度条 → window.ADS.E.sync
+ads-enhance.js     双向模式入口：生命周期、模式切换、对外接口 → window.ADS.enh
 content.js         内容脚本入口：消息路由、初始化
 inject-main.js     MAIN world：劫持 appendBuffer，复制音频片段给双向模式用
 mux.min.js         原生 HLS 那条链路用来把 ts 转成 fMP4（Apache-2.0，仅完整版）
@@ -665,7 +672,7 @@ globalThis.ADS_BUILD = { capture: true };   // 打包时由 package.js 改成 fa
 
 代码里读这个标记的地方只有三处，都很短：
 
-- `ads-enhance.js` 的 `captureEnabled()` —— `pickRoute()` 里 `capture` 那条判断前面加它，面板按钮文案也跟着切
+- `ads-enh-core.js` 的 `captureEnabled()` —— `pickRoute()` 里 `capture` 那条判断前面加它，面板按钮文案、链路编号也跟着切
 - `background.js` —— `importScripts('bg-capture.js')` 只在 `capture !== false` 时执行；消息路由给 `captureStart/captureStop` 加了 `typeof` 兜底，避免上架版里调用不存在的函数
 - `bg-auth.js` 的 `contentScriptFiles()` —— `mux.min.js` 按标记决定要不要列进注册表，**漏了这一步整条注册会抛错，结果是面板根本不注入**
 
@@ -679,6 +686,7 @@ globalThis.ADS_BUILD = { capture: true };   // 打包时由 package.js 改成 fa
 node tools/test-toggle.js    # 点图标的状态机
 node tools/test-inject.js    # appendBuffer 劫持与数据复制
 node tools/test-pagekind.js  # 播放方式判定（MSE / 原生 HLS / 直连 / 未知）
+node tools/test-modules.js   # 双向模式五个模块的装配顺序、重复注入、依赖缺失
 ```
 
 > 覆盖：首点接管、再点停止、换标签页先拆旧的、捕获被拒要提示且不留残留状态、页面不允许注入时退回图标角标、延迟值落盘、标签页关闭自动收尾。

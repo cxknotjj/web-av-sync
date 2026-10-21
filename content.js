@@ -3,10 +3,15 @@
 /* ================================================================
  * 内容脚本入口
  *
- * 三块分工：
+ * 分工：
  *   ads-template.js  样式与结构模板（纯字符串）
  *   ads-ui.js        面板、提示、交互        → window.ADS.ui
- *   ads-enhance.js   双向模式三条链路        → window.ADS.enh
+ *   ads-detect.js    挑 video、判断播放方式  → window.ADS.detect
+ *   ads-enh-core.js  状态、常量、缓冲工具    ┐
+ *   ads-enh-panel.js 面板文案                │ 共用 window.ADS.E
+ *   ads-enh-route.js 三条链路的实现          │ 按这个顺序注入，
+ *   ads-enh-sync.js  同步循环                │ 后者解构前者
+ *   ads-enhance.js   生命周期 + 对外接口     ┘ → window.ADS.enh
  *   本文件           消息路由、初始化、把两者接起来
  * ================================================================ */
 

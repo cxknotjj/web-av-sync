@@ -38,6 +38,11 @@ const INCLUDE = [
   'ads-template.js',
   'ads-ui.js',
   'ads-detect.js',
+  /* 双向模式的五块，注入顺序就是这里的顺序 */
+  'ads-enh-core.js',
+  'ads-enh-panel.js',
+  'ads-enh-route.js',
+  'ads-enh-sync.js',
   'ads-enhance.js',
   'content.js',
   'inject-main.js',
