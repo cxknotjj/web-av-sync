@@ -228,7 +228,9 @@
   host.addEventListener('pointerenter', function () { hovering = true; });
   host.addEventListener('pointerleave', function () { hovering = false; });
 
-  document.addEventListener('keydown', function (e) {
+  document.addEventListener('keydown', onKeydown, true);
+
+  function onKeydown(e) {
     if (!hovering) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
@@ -247,7 +249,7 @@
     e.stopPropagation();
     setValue(next);
     queueDelay(currentMs);
-  }, true);
+  }
 
   /* ---------------- 滚轮 ----------------
    * 触控板一次滑动会连发几十个小 delta，必须累积到「一格」再动，
@@ -338,12 +340,21 @@
 
   function destroy() {
     document.removeEventListener('fullscreenchange', syncFullscreen, true);
+    /* 这两个监听器挂在 document 上，不摘掉的话「停止 → 再接管」每来一次
+       就多一份：旧实例的 currentMs 是陈旧的，方向键一动，几个实例各自
+       往后台发一个 setDelay，谁的先到谁生效，数值就变得不受控。 */
+    document.removeEventListener('keydown', onKeydown, true);
+    if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+    if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
     try { host.remove(); } catch (e) {}
-    if (window.ADS) window.ADS.ui = null;
-    window.__adsPanel = null;
+    /* 只有「当前注册的还是自己」才清引用：重复注入时新实例已经把
+       window.ADS.ui 换成自己，旧实例的 destroy 不能把它抹掉。 */
+    if (window.ADS && window.ADS.ui === api) window.ADS.ui = null;
+    if (window.__adsPanel === api) window.__adsPanel = null;
   }
 
-  window.ADS.ui = {
+  const api = {
     host: host,
     shadow: shadow,
 
@@ -377,8 +388,9 @@
     }
   };
 
+  window.ADS.ui = api;
   /* 老代码里通过 window.__adsPanel 拿到面板，保留这个别名 */
-  window.__adsPanel = window.ADS.ui;
+  window.__adsPanel = api;
 
   syncFullscreen();
   document.documentElement.appendChild(host);

@@ -16,6 +16,9 @@
     let fsEl = null;
     try { fsEl = document.fullscreenElement || null; } catch (e) {}
     if (fsEl) {
+      /* querySelector 只找后代：video 自己被全屏时得单独判，
+         否则会掉回「按面积挑」，多播放器的页面就挑错了。 */
+      if (fsEl.tagName === 'VIDEO') return fsEl;
       const inFs = fsEl.querySelector('video');
       if (inFs) return inFs;
     }

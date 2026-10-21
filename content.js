@@ -14,11 +14,22 @@
   const U = window.ADS && window.ADS.ui;
   const E = window.ADS && window.ADS.enh;
 
+  /* 同一个文档可能被注入多次（点图标 → 停止 → 再点图标、出错后重注入）。
+     每次注入都是全新的 IIFE，上一份的 runtime.onMessage 监听器不会自己消失，
+     于是同一条消息被处理 N 次 —— 抓切片的 seg 会被重复 demux、MSE 片段
+     被重复 append，声音就出现重影或整段 append 失败。
+     这里先把上一份的监听器和定时器收掉。注意只收监听器：面板和增强实例
+     已经由新实例接手，旧实例不能 destroy 它，否则会把新面板一起弄没。 */
+  try {
+    if (typeof window.__adsContentTeardown === 'function') window.__adsContentTeardown();
+  } catch (e) {}
+
   if (!U || !E) return;
 
-  /* 重复注入（停止后再点图标重新接管）：ads-ui / ads-enhance 每次注入都会
-     跑一遍、换上新实例，content.js 也必须完整重跑给新实例接线 —— 只做早退的
-     话新面板会出现但没人绑事件，「启用双向」按钮永远藏着。
+  /* 重复注入（停止后再点图标重新接管）：content.js 每次都是新 IIFE，必须
+     完整重跑给当前面板接线 —— 只做早退的话面板会出现但没人绑事件，
+     「启用双向」按钮永远藏着。ads-ui / ads-enhance 有各自的守卫，
+     重复注入不会换成新实例（所以 E.init 自己也要防重）。
      清理残留面板时**只能删别的实例**：ads-ui 在模块加载时就把新面板挂上了，
      而本文件在它之后执行，按 id 直接删会把刚建好的新面板删掉（reveal 不会
      重新 append，面板从此永远不出现）。 */
@@ -28,7 +39,21 @@
     });
   } catch (e) {}
 
+  let detached = false;
+
+  /** 只摘自己挂上去的东西，不动面板和增强实例 */
+  function detach() {
+    if (detached) return;
+    detached = true;
+    try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch (e) {}
+    if (announceTimer) clearInterval(announceTimer);
+    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+  }
+
+  window.__adsContentTeardown = detach;
+
   function teardown() {
+    detach();
     try { if (E.isEnhanced()) E.exit(); } catch (e) {}
     try { U.destroy(); } catch (e) {}
   }
@@ -102,7 +127,7 @@
 
   /* ---------------- 后台 / MAIN world 的消息 ---------------- */
 
-  chrome.runtime.onMessage.addListener(function (msg) {
+  function onRuntimeMessage(msg) {
     if (!msg || msg.target !== 'content') return;
 
     if (msg.type === 'panel-show') {
@@ -145,7 +170,9 @@
     if (msg.type === 'stopped') {
       teardown();
     }
-  });
+  }
+
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
 
   /* ---------------- 全屏：调试会话会被浏览器掐掉 ----------------
    * 实测（Edge 151）：标签页一进全屏，Chromium 就把扩展挂在它上面的 debugger

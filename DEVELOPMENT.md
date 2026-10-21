@@ -116,21 +116,32 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 | 三条链路各有前提        | **MSE 播放器**（`blob:`）走①，零额外带宽但要授权 + 刷新；**原生 HLS**（`.m3u8`）优先走②，抓不到再退③；**直连 mp4** 只能走③  |
 | 能提前多少取决于缓冲      | 只能提前到「已经下载到」的位置，超出会卡住等数据                                                                                         |
 | 误差几十毫秒          | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20\~70ms                                                                          |
-| 和 tabCapture 互斥 | 进入双向模式会停掉捕获链路，主视频转为静音                                                                                            |
+| 和 tabCapture 的关系 | **不互斥**：进入双向模式只是把主视频静音、改由本地音轨出声，tabCapture 链路保留着（标签页音频此时是静音的）。退出双向时 `videoEl.muted = false`，声音原样回到那条链路，面板数值会被 `syncDelayToSw()` 同步过去，听感上没有断点 |
 
 ### 缓冲跟不上提前量时：按住画面等下载
 
 `syncTick()` 每 250ms 对一次表：音频要播的位置是 `want = video.currentTime - currentMs/1000`，
 `bufferedLead(want)` 返回「want 之后还剩多少秒缓冲」，负数就是「还差多少秒」。
 
+`bufferedLead` 在目标**落在缓冲范围之外**时返回的是「离最近的缓冲边缘有多远」：
+
+- 在末尾之后 → 还没下到那儿（提前量拖得比下载还快）
+- 在开头之前 → 用户把进度条拖回去了，缓冲里没有更早的数据
+
+两种都必须返回**可测量的数字**，不能一律给 `-999`。原因见下面「还在下载」那一条：
+等缓冲期间唯一的进度信号就是这个数在变大。老实现只处理「末尾之后」，往回拖时
+`bufferedLead` 恒为 `-999`、缓冲末尾又是旧位置的高水位永远不长，4 秒就被判成
+「下不来了」，提前量被清掉、声音也没回来。
+
 | 情形 | 行为 |
 | --- | --- |
-| `lead >= 0.3`（RESUME_LEAD） | 正常播，差 40ms 以上就 seek 对齐 |
-| `lead` 在 -0.4 ~ 0.3 之间 | 原地等下一拍 —— 网络抖一下很正常，别为它按暂停 |
+| `lead >= 1.5`（RESUME_LEAD） | 正常播，差 40ms 以上就倍速/seek 对齐 |
+| `lead` 在 -0.4 ~ 1.5 之间 | 原地等下一拍 —— 网络抖一下很正常，别为它按暂停 |
 | `lead < -0.4`（WAIT_GAP） | **`stallNow()`：视频和音频一起 pause**，面板右侧改成「等缓冲 · 还差 N 秒」 |
-| 等待中缓冲还在长 | 继续等，多长都行（面板数字在减少，用户看得见） |
-| 缓冲 4 秒（WAIT_STUCK_MS）一点没长 | `giveUpWait()`：**把提前量自动降到缓冲撑得住的位置**并恢复播放 |
+| 等待中 `lead` 在变大 **或** 缓冲末尾在长 | 继续等，多长都行（面板数字在减少，用户看得见） |
+| 两者 4 秒（WAIT_STUCK_MS）都没动 | `giveUpWait()`：**把提前量自动降到缓冲撑得住的位置**并恢复播放 |
 | 总等待超 30 秒（WAIT_MAX_MS） | 同上，无条件放弃 |
+| 已经降到当前值（没得降了） | `enhFail()` 退出双向、归还原声 —— 再放开只会变成「停一会儿、动半秒」的循环 |
 
 两个关键设计：
 
@@ -285,11 +296,17 @@ audio.currentTime = video.currentTime − currentMs/1000
 
 | | ① MSE 复用（`blob:`） | ② 调试协议抓切片（`.m3u8`） | ③ 直连再拉一路（`.m3u8` / `.mp4`） |
 |---|---|---|---|
-| 触发条件 | 页面用 hls.js / dash.js 等 MSE 播放器 | `video.currentSrc` 是 `.m3u8` 且 mux.js 可用 | ①②都不成立 |
+| 触发条件 | 页面用 hls.js / dash.js 等 MSE 播放器 | `video.currentSrc` 是 `.m3u8` 且 mux.js 可用 | ①②都不成立，且 `currentSrc` 是 `.m3u8` / 直连媒体 |
 | 数据来源 | `addSourceBuffer` 处截获的 fMP4 片段 | 调试协议取回播放器已下载的 ts，mux.js 转 fMP4 | 浏览器对同一 URL 再解码一遍 |
 | 额外带宽 | **零** | **零** | **双倍** |
 | 需要的权限 | 站点授权 + 刷新一次 | 站点授权 + `debugger` 权限 | **零权限、零刷新** |
 | 副作用 | 无 | 页面顶部「正在调试此浏览器」黄条 | 无明显副作用，只是费流量 |
+
+**`video.currentSrc` 直接是 `.mpd`（`dash`）的页面三条链路都不给。** `<audio src>`
+喂不进 DASH 清单，走 ③ 只会白等 15 秒再超时；页面上这种 `src` 本身也播不出画面
+（Chrome 没有原生 DASH），真用 dash.js 的站点 `currentSrc` 是 `blob:`，归 ① 管。
+所以 `pageKind()` 认出 `dash` 之后，面板直接写「此页不支持双向」，**不能**
+让用户去点授权、刷新一轮才发现没用。
 | 注入时机 | 必须 `document_start`，否则拿不到 init segment | 必须 `document_start` | 无要求，点一下就行 |
 | 失效场景 | 页面不用 MSE | 调试器已被 DevTools 占用、切片迟迟不下完、流是 fMP4 分片 | 流需要 Referer/token 校验、DRM、直播窗口太窄 |
 
@@ -367,6 +384,22 @@ if (document.documentElement.dataset.adsHooked === '1') {
 跨域也能用：`window.parent.postMessage(..., '*')` 不受同源限制，多层 iframe 会逐层往上转发。父框架把结果写在 `documentElement.dataset.adsChildVideo` 上，F12 看一眼就知道有没有收到。
 
 `tabCapture` 的延迟模式不受影响——它抓的是整个标签页的混音，音频从哪层框架出来都一样。
+
+### 重复注入：每次接管都要把上一份的监听器收掉
+
+同一个文档会被注入不止一次：点图标 → 停止 → 再点图标、`notifyError` 之后重新接管、
+导航完成后的补注入，都是往同一个页面里**再跑一遍**这五个文件。
+
+- `ads-ui.js` / `ads-enhance.js` 有 `window.ADS.xxx` 守卫，第二份会直接 return，
+  所以面板和状态机只有一个实例；`ads-enhance` 的 `init()` 也因此必须自己防重
+  （`inited` 标记）—— 它会被反复调用，而 `window.addEventListener('message')`
+  每调一次就多一条，`seg` / `chunk` 会被处理 N 次、MSE 片段被重复 append。
+- `content.js` **没有**守卫（上一版就是靠它早退，结果新面板没人接线），所以它每次
+  都是新 IIFE。它的 `chrome.runtime.onMessage` 监听器必须由下一份主动摘掉：
+  文件开头调 `window.__adsContentTeardown()`，把上一份的监听器和定时器收掉。
+  **只收自己的监听器**，不要顺手 `destroy()` 面板 —— 面板已经归新实例管了。
+- `ads-ui.destroy()` 清 `window.ADS.ui` 前要先比对身份（`=== api`），
+  否则旧实例的销毁会把新实例的引用抹掉，下一次 `ads-ui` 加载时又建一个面板。
 
 ### 实测数据
 
@@ -694,7 +727,7 @@ JSON.parse(document.documentElement.dataset.adsState)
 
 | 字段 | 含义 |
 | --- | --- |
-| `kind` | 播放方式：`mse` / `hls` / `direct` / `stream` / `unknown` / `none` |
+| `kind` | 播放方式：`mse` / `hls` / `dash` / `direct` / `stream` / `unknown` / `none` |
 | `mux` | mux.js 是否可用。为 `false` 时 ② 直接被跳过 |
 | `hookInstalled` / `hookReady` | 增强脚本装上了 / 真的截到音频轨（两者是两件事） |
 | `mode` | 当前链路：`mse` / `capture` / `src` |
@@ -717,6 +750,7 @@ document.documentElement.dataset.adsDiag
 | 有 `hit:` 没 `fin` | 流式请求悬着不结束 | 只能靠 12 秒超时降级 |
 | 有 `fin` 没 `body` | 响应体已被回收 | 检查 `Network.enable` 的 buffer 参数 |
 | 全屏前正常、全屏后只剩 `attach-ok` 不再有新事件 | **浏览器把调试会话掐了** | 见「全屏会把调试会话掐掉」，`fullscreenchange` 里已自动重连；如果还断，看 SW 里 `captureReattach` 的返回值 |
+| 页面顶部黄条一直挂着、再点启用双向报 `Another debugger is already attached` | 上一轮抓取失败时没 detach（`sourceopen` 建 SourceBuffer 抛错那条分支漏了） | 已修：`enhFail()` 在 `enhMode === 'capture'` 时统一发 `captureStop`，超时降级不再重复发 |
 
 **`mux: false` 说明注入的脚本清单漏了 `mux.min.js`**
 

@@ -125,7 +125,7 @@ function runRoute(kindName, build, hook, chunkCount) {
 console.log('\n[9] 链路选择：完整版三条都在');
 check('hls + 有 mux', runRoute('hls', undefined), 'capture');
 check('direct', runRoute('direct', undefined), 'src');
-check('dash', runRoute('dash', undefined), 'src');
+check('dash 不给链路（<audio> 喂不进清单）', runRoute('dash', undefined), '');
 check('mse 已截到片段', runRoute('mse', undefined, true, 3), 'mse');
 check('stream 不支持', runRoute('stream', undefined), '');
 
@@ -133,7 +133,7 @@ console.log('\n[10] 链路选择：上架版没有链路②');
 check('hls 不走 capture', runRoute('hls', { capture: false }), 'src');
 check('即使 mse 片段在手也优先复用', runRoute('mse', { capture: false }, true, 3), 'mse');
 check('direct 不变', runRoute('direct', { capture: false }), 'src');
-check('dash 不变', runRoute('dash', { capture: false }), 'src');
+check('dash 仍然不给链路', runRoute('dash', { capture: false }), '');
 
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');
 process.exit(failures === 0 ? 0 : 1);

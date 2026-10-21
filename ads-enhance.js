@@ -47,6 +47,7 @@
   /* ---------------- 状态 ---------------- */
 
   let ui = null;
+  let inited = false;         /* window 消息监听器只装一次，见 init() */
 
   let enhanced = false;
   /* hookInstalled：MAIN world 的脚本装上了
@@ -86,6 +87,7 @@
   let stallSince = 0;
   let stallTail = 0;          /* 进等待时的缓冲末尾，用来判断「还在不在下载」 */
   let stallTailAt = 0;        /* 缓冲最后一次增长的时刻 */
+  let stallLead = -999;       /* 进等待时「目标位置离可播数据还差多少」 */
   let lastStallToast = 0;     /* 上次「等缓冲」toast 的时间，做冷却用 */
   /* 已经因为等不到而自动降档几次。降过一次还不够的，第二次直接归零 ——
      否则会「降一点、再卡四秒、再降一点」，比一直卡着还难受。 */
@@ -132,7 +134,9 @@
   function pickRoute(kind) {
     if (hookReady && chunks.length) return 'mse';
     if (captureEnabled() && kind === 'hls' && typeof muxjs !== 'undefined') return 'capture';
-    if (kind === 'hls' || kind === 'direct' || kind === 'dash') return 'src';
+    /* 只有「浏览器能自己解码的单文件流」才走 ③。<audio> 喂不进 .mpd 清单，
+       DASH 页面走 ③ 只会等到 15 秒超时，所以这里明确不给链路。 */
+    if (kind === 'hls' || kind === 'direct') return 'src';
     return '';
   }
 
@@ -146,6 +150,8 @@
         return '视频还没开始加载。先点一下播放，播几秒再试。';
       case 'stream':
         return '这个页面播的是实时媒体流（MediaStream），音频不经过 MSE，双向模式用不了。延迟模式仍可用。';
+      case 'dash':
+        return '这个页面是 DASH（.mpd）清单，音频片段没有可复用的通道，双向模式用不了。延迟模式仍可用。';
       default:
         return '双向模式没有覆盖这种播放方式。请刷新页面重试，若仍复现请反馈。';
     }
@@ -213,17 +219,27 @@
   /** 目标位置相对已缓冲数据的余量。
    *  正数 = 后面还有这么多秒可以播；负数 = 还差这么多秒才够播到那儿。
    *  用它区分「只差一丁点，等下一拍就行」和「差得远，必须按住画面」。
-   *  缓冲区为空时返回 -999，等于「一秒都没有」，直接按暂停。 */
+   *  缓冲区为空时返回 -999，等于「一秒都没有」，直接按暂停。
+   *
+   *  目标落在缓冲范围**之外**时，返回「最近的缓冲边缘有多远」的负数：
+   *    · 在末尾之后 → 还没下到那儿（正常前进时拖太远的提前量）
+   *    · 在开头之前 → 用户把进度条拖回去了，缓冲里没有更早的数据
+   *  两种都返回可测量的数字，而不是一律 -999：只有这样，等缓冲期间
+   *  「数字在变大」才能证明还在下载，「一动不动」才等于真卡住。 */
   function bufferedLead(t) {
     if (!enhAudio) return -999;
     const b = enhAudio.buffered;
-    let worst = -999;
+    if (!b.length) return -999;
+
+    let nearest = -1;
     for (let i = 0; i < b.length; i++) {
-      if (t >= b.start(i) && t <= b.end(i)) return b.end(i) - t;
-      const gap = t - b.end(i);
-      if (gap > 0 && -gap > worst) worst = -gap;
+      const s = b.start(i);
+      const e = b.end(i);
+      if (t >= s && t <= e) return e - t;
+      const d = t < s ? s - t : t - e;
+      if (nearest < 0 || d < nearest) nearest = d;
     }
-    return worst;
+    return -nearest;
   }
 
   /** 音频位置对齐。
@@ -268,6 +284,7 @@
       stallSince = Date.now();
       stallTail = bufferedEnd();
       stallTailAt = stallSince;
+      stallLead = bufferedLead(videoEl.currentTime - currentMs() / 1000);
       /* 全屏时面板多半被收起，画面突然停住得有句话解释，不然像卡死了。
          一次等待只弹一条，且 20 秒冷却 —— 网络差导致连环等待时不刷屏。 */
       if (ui && Date.now() - lastStallToast > 20000) {
@@ -316,16 +333,22 @@
     const target = Math.max(-budget * 1000, currentMs());
     stallGiveUps++;
 
+    /* 已经没什么可降的了：音频在这一段就是没下载下来（往回拖得太远、
+       或者站点把流切走了）。再放开画面只会「停一会儿、动半秒」地循环，
+       不如老实退回原声 —— 至少画面和声音都是用户熟悉的那一份。 */
+    if (target === currentMs()) {
+      enhFail('这个位置一直没缓冲到音频，已退出双向模式，声音回到页面原声。');
+      return;
+    }
+
     stalledByUs = false;
     stallSince = 0;
 
-    if (target !== currentMs()) {
-      if (ui) ui.setValue(target);
-      try {
-        chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: target })
-          .catch(function () {});
-      } catch (e) {}
-    }
+    if (ui) ui.setValue(target);
+    try {
+      chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: target })
+        .catch(function () {});
+    } catch (e) {}
 
     if (ui) {
       ui.showToast(target === 0
@@ -356,16 +379,22 @@
      * 按住的，走下面那条分支只会一直 return，再也没人把它放开。 */
     if (stalledByUs) {
       const need = videoEl.currentTime - currentMs() / 1000;
-      if (bufferedLead(need) >= RESUME_LEAD) {
+      const lead = bufferedLead(need);
+      if (lead >= RESUME_LEAD) {
         alignAudio(need);
         resumeNow();
         return;
       }
 
-      /* 只要还在下载就继续等 —— 面板上「还差 N 秒」在减少，用户是看得见的。
-         真正该放弃的信号是「缓冲一动不动」。 */
+      /* 「还在下载」有两种长相：缓冲末尾在往前长（正常前进），或者目标位置
+         离可播数据越来越近（用户把进度条拖回去，要从更早的地方重新下）。
+         任一个在动就继续等。以前只看末尾 —— 往回拖时末尾是旧位置的高水位，
+         永远不长，4 秒就误判成「下不来了」把提前量清掉。 */
       const tail = bufferedEnd();
-      if (tail > stallTail + 0.05) {
+      if (lead > stallLead + 0.05) {
+        stallLead = lead;
+        stallTailAt = Date.now();
+      } else if (tail > stallTail + 0.05) {
         stallTail = tail;
         stallTailAt = Date.now();
       }
@@ -405,11 +434,31 @@
     return ui ? ui.getValue() : 0;
   }
 
+  /** 把面板上的数值同步给 tabCapture 那条链路。
+   *  双向期间 queueDelay 是直接 return 的（数值只作用于本地音轨），
+   *  所以 offscreen 里的 delayNode 还停在进入双向之前的值。退出时面板可能
+   *  被钳制过（负值归零），不同步的话听起来仍是一个旧延迟。 */
+  function syncDelayToSw() {
+    try {
+      chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: currentMs() })
+        .catch(function () {});
+    } catch (e) {}
+  }
+
   /* ---------------- 收尾 / 落定 ---------------- */
 
   /** 收尾：拆掉音频元素，视频恢复原声。msg 为空则不打扰用户。 */
   function enhFail(msg, then) {
     if (enhGuard) { clearTimeout(enhGuard); enhGuard = null; }
+
+    /* 抓切片这一路失败时也要把调试会话拆掉。漏了这一步的话浏览器顶部
+       那条「正在调试」会一直挂着，下次 attach 还会撞上
+       "Another debugger is already attached" —— 之后只能刷新页面。 */
+    if (enhMode === 'capture') {
+      try {
+        chrome.runtime.sendMessage({ target: 'sw', type: 'captureStop' }).catch(function () {});
+      } catch (e) {}
+    }
 
     if (enhAudio) {
       try { enhAudio.pause(); } catch (e) {}
@@ -436,7 +485,8 @@
       if (stalledByUs) {
         stalledByUs = false;
         stallSince = 0;
-        try { enhAudio.playbackRate = 1; } catch (e) {}
+        /* 这里别碰 enhAudio：上面已经把它置 null 销毁了（老代码在这里
+           写 enhAudio.playbackRate = 1，永远只抛一个被吞掉的 TypeError）。 */
         try {
           const p = videoEl.play();
           if (p && p.catch) p.catch(function () {});
@@ -450,6 +500,7 @@
 
     updateModeUI();
     if (msg && ui) ui.showToast(msg);
+    syncDelayToSw();
     if (typeof then === 'function') then();
   }
 
@@ -549,11 +600,9 @@
     enhMS = new MediaSource();
     enhAudio.src = URL.createObjectURL(enhMS);
 
-    /* 12 秒还抓不到就退到「再拉一路」。中间过程对用户不可见。 */
-    enhGuard = setTimeout(function () {
-      chrome.runtime.sendMessage({ target: 'sw', type: 'captureStop' }).catch(function () {});
-      fallback();
-    }, 12000);
+    /* 12 秒还抓不到就退到「再拉一路」。中间过程对用户不可见。
+       captureStop 由 fallback → enhFail 统一发，这里不要重复发。 */
+    enhGuard = setTimeout(fallback, 12000);
 
     enhMS.addEventListener('sourceopen', function () {
       try {
@@ -688,9 +737,7 @@
       /* 记下为什么没走更省的链路 —— 这两种情况代价差一倍，用户有权知道 */
       routeWhy = kind === 'direct'
         ? '页面是直连媒体（.mp4 / 非 m3u8），没有切片可抓，只能重新拉一路'
-        : kind === 'dash'
-          ? '页面是 DASH（.mpd）清单，切片抓取暂不支持，只能重新拉一路'
-          : '有 m3u8 但取不到切片数据';
+        : '有 m3u8 但取不到切片数据';
       startViaSrc(v);
       return;
     }
@@ -738,7 +785,8 @@
       if (stalledByUs) {
         stalledByUs = false;
         stallSince = 0;
-        try { enhAudio.playbackRate = 1; } catch (e) {}
+        /* 这里别碰 enhAudio：上面已经把它置 null 销毁了（老代码在这里
+           写 enhAudio.playbackRate = 1，永远只抛一个被吞掉的 TypeError）。 */
         try {
           const p = videoEl.play();
           if (p && p.catch) p.catch(function () {});
@@ -749,10 +797,12 @@
 
     enhanced = false;
     if (ui) {
+      /* setEnhanced(false) 会把负值钳回 0（minMs 归零），钳完要同步给
+         tabCapture 那条链路，否则面板写着 0.000、听起来还是旧延迟 */
       ui.setEnhanced(false);
-      if (ui.getValue() < 0) ui.setValue(0);
     }
     updateModeUI();
+    syncDelayToSw();
   }
 
   /* ---------------- 模式文案 ---------------- */
@@ -795,8 +845,11 @@
     /* 等缓冲时右侧那截改报「还差多少」——不然用户看到「可提前 0.0s」
        却不知道画面为什么要停在那儿 */
     if (stalledByUs) {
-      const lack = Math.max(0, (videoEl.currentTime - currentMs() / 1000) - tail);
-      ui.setRouteMeta('等缓冲 · 还差 ' + lack.toFixed(1) + 's');
+      const lead = bufferedLead(videoEl.currentTime - currentMs() / 1000);
+      /* -999 是「一段缓冲都没有」的哨兵值，别拿它算成「还差 999 秒」 */
+      ui.setRouteMeta(lead <= -900
+        ? '等缓冲 · 下载中…'
+        : '等缓冲 · 还差 ' + Math.max(0, -lead).toFixed(1) + 's');
       return;
     }
 
@@ -859,6 +912,13 @@
 
     if (kind === 'direct') {
       ui.setModeBtn('启用双向', '用同一条流的音频再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量', false);
+      return;
+    }
+
+    /* DASH：<audio> 喂不进 .mpd 清单，点下去只会白等 15 秒再失败，
+       所以按钮直接说明不支持，别让用户去授权、去刷新折腾一圈 */
+    if (kind === 'dash') {
+      ui.setModeBtn('此页不支持双向', 'DASH（.mpd）清单由页面自己的播放器解码，音频片段没有可复用的通道。延迟模式仍可用', false);
       return;
     }
 
@@ -927,6 +987,12 @@
     if (k === 'hls' || k === 'direct') { enterEnhanced(); return; }
 
     if (!ui) return;
+
+    /* DASH 清单：别走到下面的授权流程 —— 授权 + 刷新之后再点还是不支持 */
+    if (k === 'dash') {
+      ui.showToast('DASH（.mpd）暂不支持双向模式，延迟模式仍然可用。');
+      return;
+    }
 
     if (hookInstalled) {
       ui.showToast(pageIsMSE()
@@ -1001,7 +1067,14 @@
     init: function (uiRef) {
       ui = uiRef;
 
-      window.addEventListener('message', onPageMessage);
+      /* 这个文件只在页面里跑一份（上面有 ADS.enh 的守卫），但 content.js
+         会在「停止 → 再接管」时被重新注入并再调一次 init。监听器只能加一次，
+         否则每片音频、每条状态消息都会被处理两遍 —— 表现为片段重复 append。 */
+      if (!inited) {
+        inited = true;
+        window.addEventListener('message', onPageMessage);
+      }
+
       ui.bind({
         mode: onModeClick,
         stop: function () {
