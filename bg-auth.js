@@ -13,7 +13,7 @@ const ENHANCED_IDS = ['ads-main', 'ads-content'];
  *  mux.min.js 只服务链路②，上架版整个文件不进包，这里也就不能列它的名字 ——
  *  registerContentScripts 遇到不存在的文件会整条抛错，结果是面板根本不注入。 */
 function contentScriptFiles() {
-  const files = ['build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-enhance.js'];
+  const files = ['build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-detect.js', 'ads-enhance.js'];
   if (!(globalThis.ADS_BUILD && globalThis.ADS_BUILD.capture === false)) files.push('mux.min.js');
   return files.concat(['content.js']);
 }

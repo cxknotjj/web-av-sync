@@ -63,10 +63,10 @@ window.ADS_STYLE = {
     }
     .x:hover { background: rgba(255, 255, 255, .1); color: #e6edf3; }
       </style>
-      <div class="toast">
+      <div class="toast" role="status" aria-live="polite">
         <span class="bar"></span>
         <span class="txt"></span>
-        <button class="x" type="button" title="关闭">×</button>
+        <button class="x" type="button" title="关闭" aria-label="关闭提示">×</button>
       </div>`;
   },
 
@@ -345,15 +345,16 @@ window.ADS_STYLE = {
         <span class="dot"></span>
         <span class="title">音画不同步调节器</span>
         <span class="grow"></span>
-        <button class="icon" data-act="collapse" title="收起">−</button>
-        <button class="icon" data-act="close" title="停止并关闭">×</button>
+        <button class="icon" data-act="collapse" title="收起" aria-label="收起面板">−</button>
+        <button class="icon" data-act="close" title="停止并关闭" aria-label="停止接管并关闭面板">×</button>
       </div>
       <div class="body">
         <div class="readout">
           <span class="num" data-el="num">0.000</span>
           <span class="unit">s</span>
         </div>
-        <input type="range" min="-10000" max="10000" step="100" value="0" data-el="slider">
+        <input type="range" min="-10000" max="10000" step="100" value="0" data-el="slider"
+               aria-label="延迟秒数，负值表示声音提前">
         <div class="steps">
           <button data-step="-1000">−1s</button>
           <button data-step="-100">−100</button>
@@ -370,7 +371,7 @@ window.ADS_STYLE = {
           <span class="route-name" data-el="routeName"></span>
           <span class="route-meta" data-el="routeMeta"></span>
         </div>
-        <div class="meter"><div class="bar" data-el="bar"></div></div>
+        <div class="meter" role="img" aria-label="音频输出电平"><div class="bar" data-el="bar"></div></div>
         <div class="foot">
           <span class="tip" data-el="tip">滚轮 / ←→ 微调 100ms</span>
           <button class="stop" data-act="stop">停止</button>

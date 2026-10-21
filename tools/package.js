@@ -37,6 +37,7 @@ const INCLUDE = [
   'offscreen.js',
   'ads-template.js',
   'ads-ui.js',
+  'ads-detect.js',
   'ads-enhance.js',
   'content.js',
   'inject-main.js',

@@ -478,6 +478,7 @@ bg-capture.js      原生 HLS 抓切片：chrome.debugger + Network.getResponseB
 offscreen.html/js  音频处理：getUserMedia → DelayNode → destination
 ads-template.js    面板与提示的样式、结构模板（纯字符串，不碰 DOM）
 ads-ui.js          面板、提示条、滑块/滚轮/键盘/拖动/全屏跟随 → window.ADS.ui
+ads-detect.js      页面检测：挑 video（全屏感知）、判断播放方式 → window.ADS.detect
 ads-enhance.js     双向模式三条链路 + 同步循环 → window.ADS.enh
 content.js         内容脚本入口：消息路由、初始化
 inject-main.js     MAIN world：劫持 appendBuffer，复制音频片段给双向模式用

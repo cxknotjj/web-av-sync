@@ -97,38 +97,11 @@
   const WAIT_STUCK_MS = 4000; /* 缓冲连续这么久一点没长 = 真下不来了，别等了 */
   const WAIT_MAX_MS = 30000;  /* 总等待上限，防止在一个永远长不起来的站上干等 */
 
-  /* ---------------- 页面探测 ---------------- */
-  function pickVideo() {
-    let best = null;
-    let bestArea = 0;
-    document.querySelectorAll('video').forEach(function (v) {
-      const area = (v.clientWidth || 0) * (v.clientHeight || 0);
-      if (area > bestArea) { bestArea = area; best = v; }
-    });
-    return best || document.querySelector('video');
-  }
-
-  /** 页面的播放方式。区分 hls / direct 是为了给准原因——
-   *  两者对双向模式的处理不一样，但为什么不行也不一样。 */
-  function pageKind() {
-    const v = pickVideo();
-    if (!v) return 'none';
-
-    /* 少数播放器把 MediaSource 挂到 srcObject，地址栏里看不到 blob: */
-    try {
-      if (v.srcObject) {
-        if (typeof MediaSource !== 'undefined' && v.srcObject instanceof MediaSource) return 'mse';
-        return 'stream';   /* MediaStream：captureStream / WebRTC，同样没有 appendBuffer */
-      }
-    } catch (e) {}
-
-    const src = String(v.currentSrc || v.src || '');
-    /* 还没开始加载时两个字段都是空的，此时既不是 MSE 也不是原生 HLS，不能乱下结论 */
-    if (!src) return 'unknown';
-    if (src.indexOf('blob:') === 0) return 'mse';
-    if (/m3u8/i.test(src)) return 'hls';
-    return 'direct';
-  }
+  /* ---------------- 页面探测 ----------------
+   * pickVideo / pageKind 拆到了 ads-detect.js（纯函数，全屏感知 + mpd 识别），
+   * 这里只接引用；对外仍然从 window.ADS.enh.pickVideo 暴露给 content.js 用。 */
+  const pickVideo = window.ADS.detect.pickVideo;
+  const pageKind = window.ADS.detect.pageKind;
 
   function pageIsMSE() {
     return pageKind() === 'mse';
@@ -159,7 +132,7 @@
   function pickRoute(kind) {
     if (hookReady && chunks.length) return 'mse';
     if (captureEnabled() && kind === 'hls' && typeof muxjs !== 'undefined') return 'capture';
-    if (kind === 'hls' || kind === 'direct') return 'src';
+    if (kind === 'hls' || kind === 'direct' || kind === 'dash') return 'src';
     return '';
   }
 
@@ -626,9 +599,7 @@
     try {
       if (msg.b64) {
         const bin = atob(msg.b64);
-        const u8 = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-        buf = u8;
+        buf = Uint8Array.from(bin, function (c) { return c.charCodeAt(0); });
       }
     } catch (e) { return; }
     if (!buf || !buf.length) return;
@@ -717,7 +688,9 @@
       /* 记下为什么没走更省的链路 —— 这两种情况代价差一倍，用户有权知道 */
       routeWhy = kind === 'direct'
         ? '页面是直连媒体（.mp4 / 非 m3u8），没有切片可抓，只能重新拉一路'
-        : '有 m3u8 但取不到切片数据';
+        : kind === 'dash'
+          ? '页面是 DASH（.mpd）清单，切片抓取暂不支持，只能重新拉一路'
+          : '有 m3u8 但取不到切片数据';
       startViaSrc(v);
       return;
     }
