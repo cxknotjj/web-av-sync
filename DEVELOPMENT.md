@@ -261,6 +261,24 @@ if (document.documentElement.dataset.adsHooked === '1') {
 }
 ```
 
+### 面板归属：接管模式下只能有一个
+
+上面那条只管「脚本注入」这一路。**接管（tabCapture）是整标签页广播 `panel-show`**，每个 frame 各收一份，早期版本每个 frame 都无条件 `reveal()`，于是跨域 iframe 影视站会出现两个面板：播放器那层（有 video，功能完整）和父框架那层（没 video，只会显示「此页不支持双向」）。
+
+现在由每层自行判断该不该出面版，规则三条：
+
+| 这一层 | 行为 |
+|---|---|
+| 有 `<video>` | 显示，并且 `postMessage` 告诉父框架「我这层有播放器」 |
+| 没有 video 的子框架 | 永不显示 |
+| 没有 video 的顶层 | 等 1.2 秒，确认没有子框架认领才兜底显示；等待期间收到信号就不显示，已经显示了就收掉 |
+
+关键在于**发信号的和显示面板的是同一批 frame**——只有真的跑着脚本、又有 video 的层才会 `postMessage`。所以「父框架兜底」和「子框架认领」不会同时成立，最多只出一个面板。
+
+兜底那 1.2 秒是必要的：视频在 iframe 里但还没加载完、或者脚本注入比面板显示晚，都可能发生。反过来，如果父框架先画了、子框架后来才报到，父框架会主动 `U.hide()`。
+
+跨域也能用：`window.parent.postMessage(..., '*')` 不受同源限制，多层 iframe 会逐层往上转发。父框架把结果写在 `documentElement.dataset.adsChildVideo` 上，F12 看一眼就知道有没有收到。
+
 `tabCapture` 的延迟模式不受影响——它抓的是整个标签页的混音，音频从哪层框架出来都一样。
 
 ### 实测数据
@@ -299,6 +317,16 @@ if (document.documentElement.dataset.adsHooked === '1') {
 | 退出双向 | 恢复出声 |
 
 父框架 `visible: false`、iframe 内 `visible: true` —— 面板只出现在真正有播放器的那一层。
+
+**面板归属专项验证**（本地 8128，同源与跨域各跑一遍）：
+
+| 场景 | 父框架 | iframe | `dataset.adsChildVideo` |
+|---|---|---|---|
+| 同源 iframe（`127.0.0.1` 套 `127.0.0.1`） | hidden | visible | `1` |
+| 跨域 iframe（`127.0.0.1` 套 `localhost`） | hidden | visible，数字同步到 `4.000` | `1` |
+| 整页无 iframe | visible | — | `null` |
+
+跨域那行是关键：iframe 面板上的数字被后台广播的 `panel-show` 改成了 4000，说明消息确实送到了 OOPIF，而父框架**收到了同一条消息却选择不显示**——正是要的行为。
 
 早前在受控页面上跑出的对照组（直连 `<video src=".m3u8">`）：
 
