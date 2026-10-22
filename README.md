@@ -27,7 +27,9 @@
 
 ## 安装
 
-**商店安装**：尚未上架，目前只能从源码装。
+**商店安装（推荐）**：[Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/dppjkonmajnmkgepepheieignphmbkfe)
+
+商店里是**上架版**（没有链路②，遇到原生 HLS 站点走链路③），两个版本的差异见下文 [两个版本](#两个版本)。
 
 **从源码安装**
 
@@ -129,7 +131,7 @@
 |---|---|---|
 | 链路 | ①②③ | ①③（没有 ②） |
 | 安装提示 | 多两条（调试后端 + 全站数据） | 只有常规几项 |
-| 从哪拿 | GitHub Releases | Edge 加载项商店 |
+| 从哪拿 | GitHub Releases | [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/dppjkonmajnmkgepepheieignphmbkfe) |
 
 差别只有 ② 这一条。② 需要 `debugger` 权限，而这个权限的安装警告是「访问网页调试后端」和「读取并更改所有网站上的所有数据」——太重了，不适合放进商店。商店版遇到原生 HLS 站点会走 ③，功能一样，只是那条流会多下载一份。
 
