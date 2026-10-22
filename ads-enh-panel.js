@@ -23,7 +23,7 @@
   const { pickVideo, pageKind } = window.ADS.detect;
   const {
     ROUTES, pickRoute, captureEnabled, routeId, bufferedLead, bufferedHas,
-    currentMs, wantTime
+    currentMs, wantTime, C
   } = E.core;
 
   /** 缓冲区间压成 "14.77-20.53" 这种短串，写进 adsState 给排查用 */
@@ -81,12 +81,12 @@
     }
 
     /* 广告插播 / 换源期间主音轨会断一段。明确写出来，别让用户以为扩展坏了。
-       capForeignAt 一直保留到正片切片回来为止，广告中途停顿也不会来回闪。 */
-    if (S.capForeignAt) {
+       foreignAt 一直保留到正片切片回来为止，广告中途停顿也不会来回闪。 */
+    if (S.cap && S.cap.isAd()) {
       S.ui.setRouteMeta(r.meta + ' · 广告插播中，声音稍后恢复');
       return;
     }
-    if (S.swapAt && Date.now() - S.swapAt < 10000) {
+    if (S.cap && S.cap.swapAt && Date.now() - S.cap.swapAt < C.SWAP_HINT_MS) {
       S.ui.setRouteMeta(r.meta + ' · 播放源切换中，正在接音频…');
       return;
     }

@@ -153,6 +153,12 @@
       return;
     }
 
+    /* SW 侧挡掉了一条广告切片：页面这边维持静音豁免和提示 */
+    if (msg.type === 'capad') {
+      try { E.onCapAd(); } catch (e) {}
+      return;
+    }
+
     /* 抓取链路各节点的状态，写到 DOM 上方便排查 */
     if (msg.type === 'capdiag') {
       try {
@@ -192,7 +198,9 @@
     try { capturing = !!E.isCapturing(); } catch (e) {}
     if (!capturing) return;
     try {
-      chrome.runtime.sendMessage({ target: 'sw', type: 'captureReattach' })
+      let baseDir = '';
+      try { baseDir = window.ADS.E.core.S.cap.dir || ''; } catch (e) {}
+      chrome.runtime.sendMessage({ target: 'sw', type: 'captureReattach', baseDir: baseDir })
         .catch(function () {});
     } catch (e) {}
   }, true);

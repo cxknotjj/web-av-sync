@@ -369,7 +369,19 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       sendResponse({ ok: false, error: 'no-capture' });
       return false;
     }
-    captureReattach(sender && sender.tab && sender.tab.id, sender && sender.frameId)
+    captureReattach(sender && sender.tab && sender.tab.id, sender && sender.frameId, msg.baseDir)
+      .then(sendResponse)
+      .catch(function () { sendResponse({ ok: false }); });
+    return true;
+  }
+
+  /* 播放器换源：只更新 SW 侧的切片目录锁，不重连调试会话 */
+  if (msg.target === 'sw' && msg.type === 'captureSetPath') {
+    if (!CAPTURE_BUILD || typeof captureSetPath !== 'function') {
+      sendResponse({ ok: false, error: 'no-capture' });
+      return false;
+    }
+    captureSetPath(sender && sender.tab && sender.tab.id, msg.baseDir)
       .then(sendResponse)
       .catch(function () { sendResponse({ ok: false }); });
     return true;
@@ -402,7 +414,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       /* 上架版没有抓切片模块。正常也走不到这里（内容脚本的 pickRoute 会先
          把 ② 排除掉），真走到了就明确回失败，别让调用方等到超时。 */
       if (typeof captureAttach !== 'function') { sendResponse(NO_CAPTURE); return false; }
-      captureAttach(sender && sender.tab && sender.tab.id, sender && sender.frameId).then(sendResponse);
+      captureAttach(sender && sender.tab && sender.tab.id, sender && sender.frameId, msg.baseDir)
+        .then(sendResponse);
       return true;
     case 'captureStop':
       if (typeof captureDetach !== 'function') { sendResponse(NO_CAPTURE); return false; }

@@ -152,7 +152,8 @@ console.log('\n[3] 跨模块依赖都接上了');
 const E = ADS.E;
 for (const k of ['pushChunk', 'pump', 'bufferedHas', 'bufferedLead', 'bufferedEnd',
   'alignAudio', 'seekAudioTo', 'trimBuffer', 'currentMs', 'syncDelayToSw',
-  'bypassCaptureDelay', 'pickRoute', 'captureEnabled', 'routeId', 'whyNoEnhanced']) {
+  'bypassCaptureDelay', 'pickRoute', 'captureEnabled', 'routeId', 'whyNoEnhanced',
+  'segDir', 'resetStream', 'decideSilence', 'decideAim']) {
   check('core.' + k, typeof E.core[k] === 'function', typeof E.core[k]);
 }
 check('life.fail 已填充', typeof E.life.fail === 'function', typeof E.life.fail);
@@ -218,6 +219,71 @@ console.log('\n[8] 链路② 主切片目录锁定（广告切片过滤）');
   check('带 query 的切片不影响目录',
     core.segDir('https://cdn.example.com/video/show/abc123/0000291.ts?token=x') === mainDir);
   check('坏地址返回空串，不抛异常', core.segDir('') === '');
+}
+
+console.log('\n[9] 链路② 流身份 / 广告状态对象');
+{
+  const cap = env.ADS.E.S.cap;
+  cap.reset();
+  cap.lock('https://cdn.example.com/video/show/abc/index.m3u8');
+  check('lock 记下主目录', cap.dir === 'https://cdn.example.com/video/show/abc/', cap.dir);
+  check('正片切片 → main',
+    cap.classify('https://cdn.example.com/video/show/abc/0000001.ts') === 'main');
+  check('广告切片 → ad',
+    cap.classify('https://cdn.example.com/video/adjump/time/1787.ts') === 'ad');
+  check('进入广告时段', cap.isAd() === true);
+  check('正片回来 → back',
+    cap.classify('https://cdn.example.com/video/show/abc/0000002.ts') === 'back');
+  check('广告状态结束', cap.isAd() === false);
+  check('最后一次广告切片时间不被 back 清掉', cap.lastForeignAt > 0);
+  cap.noteAudio();
+  check('数据在来 → isFeeding', cap.isFeeding() === true);
+  cap.reset();
+  check('reset 清空流身份',
+    cap.dir === '' && cap.src === '' && !cap.isAd() && !cap.isFeeding()
+    && cap.lastForeignAt === 0);
+}
+
+console.log('\n[10] 链路② 静音/位置决策（纯函数）');
+{
+  const core = env.ADS.E.core;
+  const ds = core.decideSilence;
+  check('广告期间静音再久也不降级',
+    ds({ adGrace: true, feeding: false, silentMs: 99999, silentLimit: 8000 }) === 'wait');
+  check('数据在来不降档',
+    ds({ adGrace: false, feeding: true, silentMs: 99999, silentLimit: 8000 }) === 'wait');
+  check('静音 1s → 继续等',
+    ds({ silentMs: 1000, silentLimit: 8000 }) === 'wait');
+  check('静音 2.5s → 自动降档',
+    ds({ silentMs: 2500, silentLimit: 8000 }) === 'downgrade');
+  check('静音 9s → 降级链路③',
+    ds({ silentMs: 9000, silentLimit: 8000 }) === 'degrade');
+
+  const da = core.decideAim;
+  check('位置已对上 → 不动', da({ needSeek: false }) === 'none');
+  check('落后且目标太远 → 不硬跳',
+    da({ needSeek: true, ahead: true, lead: -10, catchUp: false }) === 'none');
+  check('落后且目标在 5s 内 → 跳',
+    da({ needSeek: true, ahead: true, lead: -2, catchUp: false }) === 'jump');
+  check('广告追赶窗口 → 允许跳',
+    da({ needSeek: true, ahead: true, lead: -100, catchUp: true }) === 'jump');
+  check('领先且缓冲在目标之前 → 退到缓冲起点',
+    da({ needSeek: true, ahead: false, hasBuffered: true, currentLead: -2 }) === 'rewind');
+  check('领先但没有缓冲 → 不动',
+    da({ needSeek: true, ahead: false, hasBuffered: false, currentLead: -2 }) === 'none');
+}
+
+console.log('\n[11] 重置责任划分（广告后重采样窗口）');
+{
+  const S = env.ADS.E.S;
+  const core = env.ADS.E.core;
+  S.ptsOffset = 24;
+  S.adResampleUntil = Date.now() + 5000;
+  core.resetSamples();
+  check('resetSamples 只清基线，不动重采样窗口', S.adResampleUntil > 0);
+  core.resetTimebase();
+  check('resetTimebase 清掉重采样窗口', S.adResampleUntil === 0);
+  check('resetTimebase 顺带清掉偏移', S.ptsOffset === 0);
 }
 
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');

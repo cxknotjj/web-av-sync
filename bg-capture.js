@@ -28,6 +28,49 @@ const capAttached = new Map();   /* tabId -> true */
 const capPending = new Map();    /* requestId -> { url, tabId } */
 let capSawAny = false;           /* 只用来确认「Network 事件确实通到这个 SW」 */
 
+/* 主切片目录锁：在 SW 侧就先挡掉广告切片，连 getResponseBody 都不发。
+   页面那边（S.cap）还会再判一次做兜底。 */
+const capDirs = new Map();       /* tabId -> 目录前缀 */
+const capAdAt = new Map();       /* tabId -> 上次通知页面「广告切片」的时刻 */
+const capHydrated = (async function () {
+  try {
+    const all = await chrome.storage.session.get(null);
+    for (const k of Object.keys(all || {})) {
+      if (k.indexOf('capDir:') === 0 && all[k]) capDirs.set(Number(k.slice(7)), all[k]);
+    }
+  } catch (e) {}
+})();
+
+/** 切片 URL → 协议+主机+路径目录。和 ads-enh-core.js 的 segDir 保持同一规则。 */
+function segDir(url) {
+  try {
+    const u = new URL(String(url));
+    const p = u.pathname;
+    return u.origin + p.slice(0, p.lastIndexOf('/') + 1);
+  } catch (e) {
+    return '';
+  }
+}
+
+function setCapDir(tabId, dir) {
+  if (!tabId) return;
+  if (dir) capDirs.set(tabId, dir);
+  else capDirs.delete(tabId);
+  try {
+    chrome.storage.session.set({ ['capDir:' + tabId]: dir || '' }).catch(function () {});
+  } catch (e) {}
+}
+
+/** 通知页面：刚有一条异源（广告）切片。页面靠它维持静音豁免和提示。 */
+function notifyAd(tabId) {
+  const now = Date.now();
+  if ((capAdAt.get(tabId) || 0) + 2000 > now) return;
+  capAdAt.set(tabId, now);
+  try {
+    chrome.tabs.sendMessage(tabId, { target: 'content', type: 'capad' }).catch(function () {});
+  } catch (e) {}
+}
+
 /* 数据要回到发起请求的那个 frame。注意 CDP 的 frameId 是字符串（如 "ABC123"），
    而 chrome.tabs.sendMessage 的 options.frameId 要数字 —— 两者不是一回事，
    直接把 CDP 的 frameId 传进去会发不出去。所以记 content 自己报上来的那个。 */
@@ -55,9 +98,10 @@ function capDiag(tabId, text) {
   } catch (e) {}
 }
 
-async function captureAttach(tabId, frameId) {
+async function captureAttach(tabId, frameId, baseDir) {
   if (!tabId) return { ok: false, error: '拿不到标签页' };
   await setCapFrame(tabId, frameId);
+  if (baseDir) setCapDir(tabId, baseDir);
   if (capAttached.has(tabId)) return { ok: true };
 
   try {
@@ -84,9 +128,19 @@ async function captureAttach(tabId, frameId) {
 async function captureDetach(tabId) {
   if (!tabId) return { ok: true };
   capAttached.delete(tabId);
+  capDirs.delete(tabId);
+  capAdAt.delete(tabId);
   for (const [id, rec] of capPending) if (rec.tabId === tabId) capPending.delete(id);
   try { await chrome.storage.session.remove('capFrame:' + tabId); } catch (e) {}
+  try { await chrome.storage.session.remove('capDir:' + tabId); } catch (e) {}
   try { await chrome.debugger.detach({ tabId: tabId }); } catch (e) {}
+  return { ok: true };
+}
+
+/** 播放器换源：只更新目录锁，不动调试会话 */
+async function captureSetPath(tabId, baseDir) {
+  if (!tabId) return { ok: false, error: '拿不到标签页' };
+  setCapDir(tabId, baseDir);
   return { ok: true };
 }
 
@@ -138,16 +192,18 @@ async function captureTake(rec, requestId) {
  * 直接 attach 会报 "Another debugger is already attached"（实测）。
  * frameId 由 content 报上来，因为 CDP 的 frameId 是字符串，不能直接给 sendMessage。
  */
-async function captureReattach(tabId, frameId) {
+async function captureReattach(tabId, frameId, baseDir) {
   if (!tabId) return { ok: false, error: '拿不到标签页' };
   await captureDetach(tabId);
-  return captureAttach(tabId, frameId);
+  return captureAttach(tabId, frameId, baseDir);
 }
 
 if (chrome.debugger && chrome.debugger.onEvent) {
-  chrome.debugger.onEvent.addListener(function (source, method, params) {
+  chrome.debugger.onEvent.addListener(async function (source, method, params) {
     const tabId = source && source.tabId;
     if (!tabId) return;
+    /* SW 可能刚被唤醒，等目录锁从 session storage 里恢复出来 */
+    await capHydrated;
 
     /* 这里不能拿 capAttached 当门槛：SW 空闲会被回收，内存里的 Map 跟着没，
        而 debugger 事件会把 SW 唤醒并重新执行本文件——那样每个事件都会被
@@ -160,6 +216,15 @@ if (chrome.debugger && chrome.debugger.onEvent) {
           capSawAny = true;
           capDiag(tabId, 'evt:' + String(url).split('/').pop().slice(0, 18));
         }
+        return;
+      }
+      /* ---- SW 侧广告过滤 ----
+         广告切片来自另一条路径（实测 /video/adjump/time/…）。这里直接不进
+         capPending，连 getResponseBody 都不发 —— 一片 1.5MB，一次广告能省
+         十几 MB 的跨进程传输。页面那边还会再判一次做兜底。 */
+      const dir = capDirs.get(tabId) || '';
+      if (dir && segDir(url) !== dir) {
+        notifyAd(tabId);
         return;
       }
       if (!capPending.size) capDiag(tabId, 'hit:' + String(url).split('/').pop().slice(0, 20));

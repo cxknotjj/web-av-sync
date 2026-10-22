@@ -107,18 +107,10 @@
     capBytes: 0,              /* 已经解出多少音频字节，用来判断「真有数据了」 */
     guardMute: null,          /* 接管期间守住「原视频静音」的监听器 */
 
-    /* 链路② 只认「主切片」：广告插播会去拉一条完全不同的切片路径
-       （实测站点是 /video/adjump/time/178…ts，主线是 /video/<剧集>/<id>/0000…ts）。
-       广告切片带着另一条时间轴，喂进主 muxer 会把解复用状态带跑 ——
-       之后主切片再进来也解不出音频，表现就是「过了 5:00 一直音频重新加载中」。
-       capBase 是接管时锁定的主切片目录，capForeignAt 记录最近一次撞到广告切片。 */
-    capBase: '',
-    capSrc: '',               /* 接管时 video 的地址，用来发现播放器换源 */
-    capForeignAt: 0,
-    capLastAt: 0,             /* 最近一次解出音频切片的时刻：数据在来，别当「抓不到」 */
-    /* 广告结束后的一段追赶窗口：音频要直接站到画面位置，允许跳到还没缓冲的
-       区间（平时差 5 秒以上不跳，因为跳过去只会变成静音；广告后不跳永远追不上）。 */
-    adCatchUpUntil: 0,
+    /* 链路② 的流身份 / 广告插播状态。字段和方法都收在这个对象里，
+       route / sync / panel 只读或调用，不再各自改顶层 S 字段。
+       定义在 C 之后（方法要用常量和 segDir）。 */
+    cap: null,
     /* 广告插播会把页面时间轴整体推移一个广告时长（实测这次 5:00 的广告把
        两边的 buffered 末尾差从 +1.7s 变成 −24s）。「同时增长」取样在这段
        很难错拍对上，改成等两边缓冲都静止后直接量差值，见 samplePtsOffset。 */
@@ -127,12 +119,6 @@
     aEndSeenAt: 0,
     vEndSeen: 0,
     vEndSeenAt: 0,
-    /* 广告/换源提示：突然没声却没有解释，用户只会觉得扩展坏了。
-       adToastAt 做冷却（一段广告里只提示一次），resumeNotice 记着
-       「这次中断要报一声恢复」，等音频真的重新出声再提示。 */
-    adToastAt: 0,
-    resumeNotice: false,
-    swapAt: 0,                /* 最近一次播放器换源的时刻，面板短暂显示「切换中」 */
 
     /* 等缓冲：要提前的量超过已下载的量时，音频会 underflow（画面在走、没声音）。
        这时由我们主动按住视频，等音频追上来再放开。stalledByUs 必须记住
@@ -227,9 +213,125 @@
                                  或切片在慢慢来都不成立）。缺了这一条，用户把滑块
                                  放在 0 或正值时就会一直挂着「音频重新加载中」。
                                  宁可多一倍流量，也不能让用户听无声。 */
-    AD_GRACE_MS: 4000         /* 抓到的切片来自别的目录（广告插播）时，主音轨
+    AD_GRACE_MS: 4000,        /* 抓到的切片来自别的目录（广告插播）时，主音轨
                                  本来就不会有新数据。这段时间内的静音不算「等
                                  不到数据」，不降档也不降级；广告结束后重新计时。 */
+    AD_TOAST_GAP_MS: 15000,   /* 广告/换源提示的冷却：一段广告只打扰用户一次 */
+    RESUME_NOTICE_MS: 60000,  /* 「声音已恢复」只在中断后一分钟内提示，过期不补 */
+    AD_SETTLE_MS: 2000,       /* 重采样前，距最后一次广告切片至少这么久 */
+    AD_SAMPLE_QUIET_MS: 1200, /* 两边缓冲都静止这么久，差值才可信 */
+    AD_RESAMPLE_MS: 45000,    /* 广告结束后允许重采样的窗口 */
+    AD_CATCHUP_MS: 20000,     /* 广告后允许音频硬跳到画面位置的窗口 */
+    MAX_OFFSET_SHIFT_S: 180,  /* 重采样允许的最大偏移跳变（广告时长上限） */
+    FEEDING_MS: 3000,         /* 多久内有新音频解出，就算「数据在来」 */
+    SWAP_HINT_MS: 10000,      /* 面板上「播放源切换中」停留多久 */
+    DOWNGRADE_MS: 2000        /* 静音多久才自动把提前量降到缓冲撑得住的位置 */
+  };
+
+  /* ---------------- 链路② 的流身份 / 广告状态 ----------------
+   *
+   * 广告插播时播放器会去拉另一条路径的切片（实测主线 /video/<剧集>/<id>/0000xx.ts，
+   * 广告 /video/adjump/time/1787…ts）。异源切片带着另一条时间轴，喂进主 muxer
+   * 会把解复用状态带跑；所以要有一个地方统一回答：
+   *   dir          接管时锁定的主切片目录
+   *   foreignAt    最近一次撞到异源切片的时刻（非 0 = 广告时段）
+   *   lastAudioAt  最近一次真的解出音频的时刻（数据在来）
+   * route / sync / panel 都通过这个对象判断，不再各自维护一套字段。 */
+  const cap = S.cap = {
+    dir: '',
+    src: '',
+    foreignAt: 0,
+    lastForeignAt: 0,
+    lastAudioAt: 0,
+    catchUpUntil: 0,
+    adToastAt: 0,
+    resumeNotice: false,
+    swapAt: 0,
+
+    reset: function () {
+      this.dir = '';
+      this.src = '';
+      this.foreignAt = 0;
+      this.lastForeignAt = 0;
+      this.lastAudioAt = 0;
+      this.catchUpUntil = 0;
+      this.adToastAt = 0;
+      this.resumeNotice = false;
+      this.swapAt = 0;
+    },
+
+    /** 锁定主切片目录（接管时调用） */
+    lock: function (url) {
+      this.dir = segDir(url);
+      this.src = String(url || '');
+    },
+
+    isAd: function () {
+      return !!this.foreignAt;
+    },
+
+    /** 广告时段内（静音不算「抓不到数据」），只持续 AD_GRACE_MS */
+    isAdGrace: function () {
+      return !!this.foreignAt && Date.now() - this.foreignAt < C.AD_GRACE_MS;
+    },
+
+    /** 最近有音频解出：静音只是位置还没追上缓冲，不是抓不到 */
+    isFeeding: function () {
+      return !!this.lastAudioAt && Date.now() - this.lastAudioAt < C.FEEDING_MS;
+    },
+
+    noteAudio: function () {
+      this.lastAudioAt = Date.now();
+    },
+
+    /** 播放器换源：更新锁定目录并提示一次 */
+    noteSource: function (src) {
+      this.src = String(src || '');
+      this.dir = segDir(src);
+      this.swapAt = Date.now();
+      if (!this.adToastAt || Date.now() - this.adToastAt >= C.AD_TOAST_GAP_MS) {
+        this.adToastAt = Date.now();
+        this.resumeNotice = true;
+        if (S.ui) S.ui.showToast('视频源已切换，正在重新接入音频…');
+      }
+    },
+
+    /** 撞到异源切片：进入广告时段。首次进入时提示一次。 */
+    noteForeign: function () {
+      if (!this.foreignAt) {
+        try {
+          document.documentElement.dataset.adsDiag =
+            ((document.documentElement.dataset.adsDiag || '') + '|ad-skip').slice(-300);
+        } catch (e) {}
+        if (!this.adToastAt || Date.now() - this.adToastAt >= C.AD_TOAST_GAP_MS) {
+          this.adToastAt = Date.now();
+          this.resumeNotice = true;
+          if (S.ui) {
+            S.ui.showToast('检测到广告插播，声音会暂停，广告结束后自动恢复');
+          }
+        }
+      }
+      this.foreignAt = Date.now();
+      /* 单独记「最后一次广告切片」，不随正片预取清掉：
+         广告可能还在播、播放器已经预取了下一条正片，此时 foreignAt 会被
+         清掉，但音频缓冲末尾还停在广告前的内容上，差值不能用来重采样。 */
+      this.lastForeignAt = this.foreignAt;
+    },
+
+    /** 处理一片切片：'main' 正片 / 'ad' 广告 / 'back' 刚回到正片 */
+    classify: function (url) {
+      const dir = segDir(url);
+      if (!this.dir && dir) this.dir = dir;
+      if (this.dir && dir && dir !== this.dir) {
+        this.noteForeign();
+        return 'ad';
+      }
+      if (this.foreignAt) {
+        this.foreignAt = 0;
+        return 'back';
+      }
+      return 'main';
+    }
   };
 
   function pageIsMSE() {
@@ -384,6 +486,66 @@
     return ms;
   }
 
+  /* ---------------- 链路② 的决策函数 ----------------
+   * captureTick 原来把「等 / 降档 / 降级」和「跳 / 回退」全写在一个 200 行的
+   * 分支里，改一个判据很容易碰坏另一个。这里抽成纯函数，返回动作字符串，
+   * captureTick 只负责执行副作用，测试可以直接验状态表。
+   */
+
+  /** 静音阶段：继续等 / 自动降档 / 降级链路③。 */
+  function decideSilence(x) {
+    /* 广告期间、或者切片还在持续解出：静音是过程，不是失败 */
+    if (x.adGrace || x.feeding) return 'wait';
+    if (x.silentMs > x.silentLimit) return 'degrade';
+    if (x.silentMs > C.DOWNGRADE_MS) return 'downgrade';
+    return 'wait';
+  }
+
+  /** 静音时音频游标怎么摆：硬跳到画面位置 / 退回缓冲起点 / 不动。 */
+  function decideAim(x) {
+    if (!x.needSeek) return 'none';
+    if (x.ahead) {
+      /* 目标点还没缓冲到时，平时不硬跳（跳过去只是把落后换成静音）；
+         广告结束后的追赶窗口例外 —— 不跳就永远追不回画面。 */
+      if (x.catchUp || x.lead > -5) return 'jump';
+      return 'none';
+    }
+    /* 目标在缓冲之前：接管时音频还停在 0、缓冲从十几秒开始那种 */
+    if (x.hasBuffered && x.currentLead < -1) return 'rewind';
+    return 'none';
+  }
+
+  /** 只清采样基线：拖进度条时用，已估出的偏移保留 */
+  function resetSamples() {
+    S.offSamples = [];
+    S.offLastA = null;
+    S.offLastV = null;
+    S.aEndSeen = 0;
+    S.aEndSeenAt = 0;
+    S.vEndSeen = 0;
+    S.vEndSeenAt = 0;
+  }
+
+  function resetVideoClock() {
+    S.vFreezePos = null;
+    S.vFreezeAt = 0;
+  }
+
+  /** 时间轴换了：偏移和采样全部归零，但不动流身份 */
+  function resetTimebase() {
+    S.ptsOffset = 0;
+    resetSamples();
+    /* 新时间轴下旧的重采样窗口没有意义，由 resetTimebase 负责清 */
+    S.adResampleUntil = 0;
+    resetVideoClock();
+  }
+
+  /** 流本身换了（接管 / 换源 / 退出）：时间轴和切片目录一起重置 */
+  function resetStream() {
+    cap.reset();
+    resetTimebase();
+  }
+
   /* ---------------- 链路② 的时间轴校准 ----------------
    *
    * 页面下载的 ts 带着原始 PTS，我们原样 append 进自己的 MediaSource；
@@ -394,27 +556,6 @@
    * 取 (音频末尾 − 视频末尾) 作为一个样本；中位数滤波后作为补偿量。
    * 只取「两边同时增长」的拍，避免一边领先一片时算出错的样本。
    */
-  function resetPtsOffset() {
-    S.ptsOffset = 0;
-    S.offSamples = [];
-    S.offLastA = null;
-    S.offLastV = null;
-    /* 时间轴换了，画面冻结判定也要从零开始 */
-    S.vFreezePos = null;
-    S.vFreezeAt = 0;
-    /* 流本身换了，主切片目录的锁定也要重来（广告插播不算换流，见 onSegChunk） */
-    S.capBase = '';
-    S.capSrc = '';
-    S.capForeignAt = 0;
-    S.capLastAt = 0;
-    S.adCatchUpUntil = 0;
-    S.adResampleUntil = 0;
-    S.aEndSeen = 0;
-    S.aEndSeenAt = 0;
-    S.vEndSeen = 0;
-    S.vEndSeenAt = 0;
-  }
-
   function samplePtsOffset() {
     if (S.enhMode !== 'capture' || !S.enhAudio || !S.videoEl) return;
 
@@ -437,15 +578,18 @@
        广告结束后等两边缓冲都静止 1.2 秒，直接量末尾差 —— 此时两边拿到的是
        同一条正片切片的末尾，差值就是新的 PTS 偏移。 */
     if (S.adResampleUntil && now < S.adResampleUntil &&
-        now - S.aEndSeenAt > 1200 && now - S.vEndSeenAt > 1200 &&
+        now - S.aEndSeenAt > C.AD_SAMPLE_QUIET_MS &&
+        now - S.vEndSeenAt > C.AD_SAMPLE_QUIET_MS &&
         now - S.vFreezeAt < 1500 &&
-        (!S.capForeignAt || now - S.capForeignAt > 2000)) {
+        /* 音频末尾必须在最后一次广告切片之后长过：广告期间播放器可能已经
+           预取了正片，foreignAt 被清掉，但音轨末尾仍停在广告前，此时
+           的 (ae-ve) 是广告画面和旧音频的差，不是新时间轴。 */
+        S.aEndSeenAt > cap.lastForeignAt &&
+        (!cap.foreignAt || now - cap.foreignAt > C.AD_SETTLE_MS)) {
       const sample = ae - ve;
       S.adResampleUntil = 0;
-      S.offSamples = [];
-      S.offLastA = null;
-      S.offLastV = null;
-      if (isFinite(sample) && Math.abs(sample) < 180 &&
+      resetSamples();
+      if (isFinite(sample) && Math.abs(sample) < C.MAX_OFFSET_SHIFT_S &&
           Math.abs(sample - S.ptsOffset) > 0.4) {
         S.ptsOffset = sample;
         try {
@@ -773,7 +917,11 @@
     bufferedEnd: bufferedEnd,
     segDir: segDir,
     silenceBudget: silenceBudget,
-    resetPtsOffset: resetPtsOffset,
+    resetStream: resetStream,
+    resetTimebase: resetTimebase,
+    resetSamples: resetSamples,
+    decideSilence: decideSilence,
+    decideAim: decideAim,
     samplePtsOffset: samplePtsOffset,
     alignAudio: alignAudio,
     seekAudioTo: seekAudioTo,

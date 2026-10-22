@@ -26,7 +26,8 @@
     pump, bufferedHas, bufferedLead, bufferedEnd,
     alignAudio, seekAudioTo, trySetAudioPos, trimBuffer, currentMs,
     wantAt, wantTime, syncCapturePipe, forcePipe, syncDelayToSw,
-    samplePtsOffset, silenceBudget, segDir, resetPtsOffset
+    samplePtsOffset, silenceBudget, resetSamples, resetVideoClock, resetStream,
+    decideSilence, decideAim
   } = E.core;
   const { paintRouteMeta, publishState } = E.panel;
   const L = E.life;
@@ -40,12 +41,14 @@
     if (!S.audioSilent) return;
     S.audioSilent = false;
     S.silentSince = 0;
-    S.swapAt = 0;
+    S.cap.swapAt = 0;
     publishState();
-    if (S.resumeNotice) {
-      S.resumeNotice = false;
+    if (S.cap.resumeNotice) {
+      S.cap.resumeNotice = false;
       /* 超过一分钟就别报了：用户早忘了那次中断，突然弹「已恢复」反而莫名其妙 */
-      if (S.ui && Date.now() - S.adToastAt < 60000) S.ui.showToast('声音已恢复');
+      if (S.ui && Date.now() - S.cap.adToastAt < C.RESUME_NOTICE_MS) {
+        S.ui.showToast('声音已恢复');
+      }
     }
   }
 
@@ -68,11 +71,8 @@
       S.silentSince = 0;
       /* 跳转后两边缓冲都换到新位置：基准重取，但已估出的偏移保留，
          避免每次拖进度条都重新经历一遍校准期。 */
-      S.offLastA = null;
-      S.offLastV = null;
-      S.offSamples = [];
-      S.vFreezePos = null;
-      S.vFreezeAt = 0;
+      resetSamples();
+      resetVideoClock();
     }
 
     const want = wantTime();
@@ -233,34 +233,30 @@
        新的流有自己的时间轴和 PID，旧 muxer / 旧样本基线继续用只会解不出音频。
        把链路上下文按「重新接管」处理；广告回到正片时 onSegChunk 还会再清一次。 */
     const src = String(S.videoEl.currentSrc || S.videoEl.src || '');
-    if (S.capSrc && src && src !== S.capSrc) {
+    if (S.cap.src && src && src !== S.cap.src) {
       S.appendQueue.length = 0;
       S.muxer = null;
       S.audioSilent = false;
       S.silentSince = 0;
       S.capSeekBytes = S.capBytes;
       S.lastPosJump = 0;
-      /* 换源会让声音断一下，得给用户一句解释（和广告共用 15 秒冷却） */
-      if (S.ui && Date.now() - S.adToastAt > 15000) {
-        S.adToastAt = Date.now();
-        S.resumeNotice = true;
-        S.swapAt = Date.now();
-        S.ui.showToast('视频源已切换，正在重新接入音频…');
-      } else {
-        S.swapAt = Date.now();
-      }
-      resetPtsOffset();
-      /* resetPtsOffset 会把锁定清空，按新地址重新锁 */
-      S.capBase = segDir(src);
-      S.capSrc = src;
+      resetStream();
+      /* 更新锁定目录 + 提示用户「换源了」 */
+      S.cap.noteSource(src);
+      /* 让 SW 侧的广告过滤也跟着换目录 */
+      try {
+        chrome.runtime.sendMessage({
+          target: 'sw', type: 'captureSetPath', baseDir: S.cap.dir
+        }).catch(function () {});
+      } catch (e) {}
     }
 
     /* 广告插播期间（抓到过异目录切片）：正片音轨本来就不会有新数据。
        下面的「抓不到切片」和「静音太久」两个降级判据都要暂停计时。 */
-    const adGrace = S.capForeignAt && Date.now() - S.capForeignAt < C.AD_GRACE_MS;
+    const adGrace = S.cap.isAdGrace();
     /* 切片还在持续解出音频：这段静音是「位置在缓冲前面等数据」，不是抓不到。
        此时降级到③只会更糟（③ 从 0 秒起播，在几分钟处根本追不回来）。 */
-    const feeding = S.capLastAt && Date.now() - S.capLastAt < 3000;
+    const feeding = S.cap.isFeeding();
 
     /* 饥饿检查放在最前面：从跳转到现在一条新切片都没抓到，说明这个位置的
        数据这条链路根本拿不到，早点换链路③，别让用户一直听无声。 */
@@ -355,6 +351,13 @@
        在 5 分钟处根本追不回来，只能退出双向。 */
     if (adGrace && S.audioSilent) S.silentSince = Date.now();
 
+    const plan = decideSilence({
+      adGrace: adGrace,
+      feeding: feeding,
+      silentMs: S.silentSince ? Date.now() - S.silentSince : 0,
+      silentLimit: S.silentLimit || C.CAP_SILENT_MAX_MS
+    });
+
     /* ---- 静音太久：换链路③ ----
        上面两条出口都有前提：降档只对负值成立（提前量是 0 或正值时降无可降），
        降级只在「跳转后 15 秒一条新切片都没抓到」时触发（没跳转、或者切片
@@ -362,8 +365,7 @@
        就会一直挂着「音频重新加载中」—— 实测限速 12KB/s 时静音了 10.5 秒，
        期间 capBytes 一动不动（一片 173KB，按这个速率要 14 秒才下得完）。
        宁可多一倍流量，也不能让用户听无声。 */
-    if (!adGrace && !feeding && S.silentSince && Date.now() - S.silentSince >
-        (S.silentLimit || C.CAP_SILENT_MAX_MS)) {
+    if (plan === 'degrade') {
       degradeCapture();
       return;
     }
@@ -375,7 +377,7 @@
 
        链路② 不按住画面，所以这里只改延迟量，既不暂停视频也不退出双向。
        带 transient 是为了不落盘 —— 用户重新进双向时还是他自己设的值。 */
-    if (!adGrace && !feeding && S.silentSince && Date.now() - S.silentSince > 2000) {
+    if (plan === 'downgrade') {
       /* 缓冲末尾是音频 PTS 轴，video.currentTime 是页面轴，两个轴的零点
          差着 ptsOffset。不减掉这一截，会把「已经播到头」误算成「还能再提前
          1.6 秒」，降档永远降不到位，声音一直卡在重新加载中。 */
@@ -403,32 +405,37 @@
        变成 +8.5 秒。所以只在 「缓冲末尾还没到目标点」 时才贴。 */
     const aim = wantTime();
     const cur = S.enhAudio.currentTime;
-    if (Math.abs(cur - aim) > C.DRIFT_SEEK) {
-      if (!seekAudioTo(aim)) {
-        if (aim > cur) {
-          /* 落后，而且目标点还没缓冲到 —— 位置先过去（seekable 已经被
-             ensureSeekRange 撑到那儿），等切片 append 进来就从这里续播。
-             老代码是挪到 bufferedEnd()-0.25：那等于把音频扔到缓冲区最边上，
-             下一拍必然 underflow，然后原地干等，落后一点没减小。
-             差得太多（5 秒以上）就别硬跳了，交给上面的降档/降级去处理 ——
-             跳过去也只是把「落后」换成「静音」。
-             例外：广告刚结束的追赶窗口内必须跳过去（见 adCatchUpUntil），
-             否则每拍只能靠略高于 1 倍速挪，永远追不回画面。 */
-          const catchUp = S.adCatchUpUntil && Date.now() < S.adCatchUpUntil;
-          if ((catchUp || bufferedLead(aim) > -5) && Date.now() - S.lastPosJump > 1500) {
-            if (trySetAudioPos(aim)) {
-              S.lastPosJump = Date.now();
-              if (catchUp) S.adCatchUpUntil = 0;
-            }
-          }
-        } else {
-          /* 领先且目标点在缓冲之外 —— 通常发生在接管的那一刻：音频还停在 0，
-             而缓冲从 10.x 秒才开始（开头那截在接管前就下载完了，永远拿不到）。
-             MSE 不会自己跳过去，主动站到缓冲起点等着，视频一进入这个区间
-             就能立刻出声。 */
-          const b = S.enhAudio.buffered;
-          if (b.length && bufferedLead(cur) < -1) trySetAudioPos(b.start(0) + 0.05);
+    const needSeek = Math.abs(cur - aim) > C.DRIFT_SEEK;
+    const catchUp = S.cap.catchUpUntil && Date.now() < S.cap.catchUpUntil;
+
+    if (needSeek && !seekAudioTo(aim)) {
+      const aimPlan = decideAim({
+        needSeek: needSeek,
+        ahead: aim > cur,
+        catchUp: catchUp,
+        lead: bufferedLead(aim),
+        hasBuffered: S.enhAudio.buffered.length > 0,
+        currentLead: bufferedLead(cur)
+      });
+      if (aimPlan === 'jump' && Date.now() - S.lastPosJump > 1500) {
+        /* 落后，而且目标点还没缓冲到 —— 位置先过去（seekable 已经被
+           ensureSeekRange 撑到那儿），等切片 append 进来就从这里续播。
+           老代码是挪到 bufferedEnd()-0.25：那等于把音频扔到缓冲区最边上，
+           下一拍必然 underflow，然后原地干等，落后一点没减小。
+           差得太多（5 秒以上）就别硬跳了，交给上面的降档/降级去处理 ——
+           跳过去也只是把「落后」换成「静音」。
+           例外：广告刚结束的追赶窗口内必须跳过去，否则每拍只能靠略高于
+           1 倍速挪，永远追不回画面。 */
+        if (trySetAudioPos(aim)) {
+          S.lastPosJump = Date.now();
+          if (catchUp) S.cap.catchUpUntil = 0;
         }
+      } else if (aimPlan === 'rewind') {
+        /* 领先且目标点在缓冲之外 —— 通常发生在接管的那一刻：音频还停在 0，
+           而缓冲从 10.x 秒才开始（开头那截在接管前就下载完了，永远拿不到）。
+           MSE 不会自己跳过去，主动站到缓冲起点等着，视频一进入这个区间
+           就能立刻出声。 */
+        trySetAudioPos(S.enhAudio.buffered.start(0) + 0.05);
       }
     }
     paintRouteMeta();

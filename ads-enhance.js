@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 /* ================================================================
  * 双向模式入口：生命周期、模式切换、对外接口
@@ -28,7 +28,7 @@
   const { pickVideo, pageKind } = window.ADS.detect;
   const {
     pushChunk, syncDelayToSw, currentMs, syncCapturePipe, resetCapturePipe,
-    forcePipe, alignAudio, wantTime, pageIsMSE, whyNoEnhanced, resetPtsOffset
+    forcePipe, alignAudio, wantTime, pageIsMSE, whyNoEnhanced, resetStream
   } = E.core;
   const { updateModeUI, publishState } = E.panel;
   const { syncTick, onVideoSeek } = E.sync;
@@ -67,7 +67,7 @@
     S.capSeekBytes = 0;
     S.muxer = null;
     S.lastPosJump = 0;
-    resetPtsOffset();
+    resetStream();
     S.enhMode = '';
     S.enhanced = false;
 
@@ -176,7 +176,7 @@
     S.capSeekBytes = 0;
     S.muxer = null;
     S.lastPosJump = 0;
-    resetPtsOffset();
+    resetStream();
 
     if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
 
@@ -353,6 +353,13 @@
     updateModeUI: updateModeUI,
     exit: exitEnhanced,
     onSegChunk: E.route.onSegChunk,
+    /* SW 在调试通道里看到广告切片（异源目录）时通知过来。
+       切片本身不会送到页面，但页面需要知道「现在在广告时段」：
+       静音豁免、面板提示、恢复提示都靠这个状态。 */
+    onCapAd: function () {
+      if (S.enhMode !== 'capture') return;
+      S.cap.noteForeign();
+    },
 
     setPermGranted: function (v) { S.permGranted = !!v; updateModeUI(); },
     setHookInstalled: function (v) { S.hookInstalled = !!v; updateModeUI(); }
