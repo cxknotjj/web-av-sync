@@ -241,6 +241,13 @@ if (chrome.debugger && chrome.debugger.onEvent) {
       capPending.delete(params.requestId);
       capDiag(rec.tabId, 'fin');
       captureTake(rec, params.requestId);
+      return;
+    }
+
+    /* 请求被取消 / 失败（拖进度条时很常见）：不会再有 loadingFinished，
+       不在这里删就会一直堆在 Map 里，长会话下越积越多。 */
+    if (method === 'Network.loadingFailed') {
+      capPending.delete(params.requestId);
     }
   });
 

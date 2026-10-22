@@ -60,6 +60,13 @@
         S.enhBuf = S.enhMS.addSourceBuffer(S.audioMime || 'audio/mp4; codecs="mp4a.40.2"');
         S.enhBuf.addEventListener('updateend', function () { S.trimBusy = false; pump(); });
         for (const c of S.chunks) S.appendQueue.push(c);
+        /* 种子已经进了播放队列，留在 chunks 里只是第二份引用。
+           只留第一片 init，供退出后再次进入时使用。 */
+        if (S.chunks.length > 1) {
+          const init = S.chunks[0];
+          S.chunks = [init];
+          S.chunkBytes = init.byteLength;
+        }
         pump();
       } catch (e) {
         L.fail('音频轨初始化失败：' + ((e && e.message) || e));

@@ -185,7 +185,10 @@
   /* ---------------- 常量 ---------------- */
 
   const C = E.C = {
-    MAX_CHUNK_BYTES: 48 * 1024 * 1024,
+    /* 进双向之前最多留这么多原始音频当种子。以前是 48MB，并且进双向后
+       还继续攒副本 —— MSE 站点会平白多占几十 MB。种子只需要覆盖
+       「进双向那一刻播放位置附近」的片段，后面会有新切片接上。 */
+    SEED_CHUNK_BYTES: 4 * 1024 * 1024,
 
     KEEP_BEHIND: 3,           /* 播放位置之前留几秒缓冲（够回退一点就行） */
     WAIT_GAP: 0.4,            /* 目标位置落后缓冲区末尾超过这么多才值得暂停 */
@@ -376,15 +379,19 @@
   function pushChunk(buf) {
     if (!(buf instanceof ArrayBuffer) || !buf.byteLength) return;
 
+    /* 已经在自己放音频：这一片直接进播放队列，不再存第二份。
+       以前不管走哪条链路都往 chunks 里塞，MSE 站点会白攒到 48MB。 */
+    if (S.enhanced && S.enhMode === 'mse') { appendChunk(buf); return; }
+
     S.chunks.push(buf);
     S.chunkBytes += buf.byteLength;
 
-    /* 太老的片段自己丢掉：留着也只会让内存一路涨上去 */
-    while (S.chunkBytes > C.MAX_CHUNK_BYTES && S.chunks.length > 2) {
-      S.chunkBytes -= S.chunks.shift().byteLength;
+    /* 太老的片段自己丢掉。第一片通常是 init segment（moov），
+       必须留着，否则退出再进双向时解不出音频。 */
+    while (S.chunkBytes > C.SEED_CHUNK_BYTES && S.chunks.length > 3) {
+      const old = S.chunks.splice(1, 1)[0];
+      S.chunkBytes -= old.byteLength;
     }
-
-    if (S.enhanced && S.enhMode === 'mse') appendChunk(buf);
   }
 
   function appendChunk(buf) {
@@ -920,6 +927,7 @@
     resetStream: resetStream,
     resetTimebase: resetTimebase,
     resetSamples: resetSamples,
+    resetVideoClock: resetVideoClock,
     decideSilence: decideSilence,
     decideAim: decideAim,
     samplePtsOffset: samplePtsOffset,

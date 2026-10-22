@@ -148,13 +148,32 @@ for (const k of API) {
   check('enh.' + k, ADS && typeof ADS.enh[k] === 'function', typeof (ADS && ADS.enh[k]));
 }
 
+/* 四个兄弟模块从 E.core 解构出来的全部函数。漏导出一个不会报错，
+   直到对应的调用点被触发（2026-10-22 resetVideoClock 漏导出，
+   拖进度条时抛 TypeError），所以这里必须逐个核对。 */
 console.log('\n[3] 跨模块依赖都接上了');
 const E = ADS.E;
 for (const k of ['pushChunk', 'pump', 'bufferedHas', 'bufferedLead', 'bufferedEnd',
-  'alignAudio', 'seekAudioTo', 'trimBuffer', 'currentMs', 'syncDelayToSw',
-  'bypassCaptureDelay', 'pickRoute', 'captureEnabled', 'routeId', 'whyNoEnhanced',
-  'segDir', 'resetStream', 'decideSilence', 'decideAim']) {
+  'alignAudio', 'seekAudioTo', 'trySetAudioPos', 'trimBuffer', 'currentMs',
+  'wantAt', 'wantTime', 'syncCapturePipe', 'forcePipe', 'resetCapturePipe',
+  'syncDelayToSw', 'bypassCaptureDelay', 'samplePtsOffset', 'silenceBudget',
+  'pickRoute', 'captureEnabled', 'routeId', 'whyNoEnhanced', 'pageIsMSE',
+  'segDir', 'resetStream', 'resetTimebase', 'resetSamples', 'resetVideoClock',
+  'decideSilence', 'decideAim']) {
   check('core.' + k, typeof E.core[k] === 'function', typeof E.core[k]);
+}
+/* 其他三块对外暴露的入口也必须都在 —— 漏一个同样是「调用时才炸」 */
+for (const k of ['paintRoute', 'paintRouteMeta', 'publishState', 'updateModeUI']) {
+  check('panel.' + k, typeof E.panel[k] === 'function', typeof E.panel[k]);
+}
+for (const k of ['enterEnhanced', 'onSegChunk', 'startViaSrc']) {
+  check('route.' + k, typeof E.route[k] === 'function', typeof E.route[k]);
+}
+for (const k of ['syncTick', 'onVideoSeek']) {
+  check('sync.' + k, typeof E.sync[k] === 'function', typeof E.sync[k]);
+}
+for (const k of ['pickVideo', 'pageKind']) {
+  check('detect.' + k, typeof ADS.detect[k] === 'function', typeof ADS.detect[k]);
 }
 check('life.fail 已填充', typeof E.life.fail === 'function', typeof E.life.fail);
 check('life.ready 已填充', typeof E.life.ready === 'function', typeof E.life.ready);
@@ -284,6 +303,31 @@ console.log('\n[11] 重置责任划分（广告后重采样窗口）');
   core.resetTimebase();
   check('resetTimebase 清掉重采样窗口', S.adResampleUntil === 0);
   check('resetTimebase 顺带清掉偏移', S.ptsOffset === 0);
+}
+
+console.log('\n[12] 链路① 原始片段缓存（内存回归）');
+{
+  const S = env.ADS.E.S;
+  const core = env.ADS.E.core;
+  const AB = (n) => vm.runInContext('new ArrayBuffer(' + n + ')', env);
+  const MB = 1024 * 1024;
+
+  /* 双向播放中：片段只进播放队列，不再留第二份副本 */
+  S.enhanced = true; S.enhMode = 'mse';
+  S.chunks = []; S.chunkBytes = 0; S.appendQueue = [];
+  core.pushChunk(AB(1024));
+  check('双向中不囤原始副本', S.chunks.length === 0 && S.chunkBytes === 0);
+  check('双向中直接进播放队列', S.appendQueue.length === 1);
+
+  /* 未启用：种子缓存有上限，且 init 片不能被淘汰 */
+  S.enhanced = false; S.enhMode = '';
+  S.chunks = []; S.chunkBytes = 0; S.appendQueue = [];
+  core.pushChunk(AB(1234));
+  for (let i = 0; i < 10; i++) core.pushChunk(AB(MB));
+  check('种子缓存不超过上限',
+    S.chunkBytes <= env.ADS.E.C.SEED_CHUNK_BYTES + MB, S.chunkBytes);
+  check('第一片 init 不被淘汰', S.chunks[0].byteLength === 1234);
+  S.chunks = []; S.chunkBytes = 0; S.appendQueue = [];
 }
 
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');
