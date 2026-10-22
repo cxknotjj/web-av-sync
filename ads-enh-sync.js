@@ -289,9 +289,32 @@
       }
     }
 
-    /* 降档之后 aim 变了，重新算一次再决定要不要摆位置 */
+    /* 降档之后 aim 变了，重新算一次再决定要不要摆位置。
+       这里原来只在偏差 > 2 秒时才动，1~2 秒的落后正好落进死区：
+       音频停在原地、视频一直在往前走，落后只会越等越大，永远追不回来。
+
+       只能「往前贴、不能往后跳」：bufferedEnd() 是整段缓冲的最末尾，
+       音频落后时它可能远在目标点之后（接管时抓到的都是预加载段）。
+       无条件跳过去等于把十几秒后的声音提前放出来 —— 实测 aT-vT 直接
+       变成 +8.5 秒。所以只在 「缓冲末尾还没到目标点」 时才贴。 */
     const aim = wantTime();
-    if (Math.abs(S.enhAudio.currentTime - aim) > 2) trySetAudioPos(aim);
+    const cur = S.enhAudio.currentTime;
+    if (Math.abs(cur - aim) > C.DRIFT_SEEK) {
+      if (!seekAudioTo(aim)) {
+        const tail = bufferedEnd();
+        if (tail <= aim + 0.1 && tail > cur + 0.3) {
+          trySetAudioPos(tail - 0.25);
+        } else if (bufferedLead(cur) < -1) {
+          /* 音频位置压根不在任何缓冲区间里 —— 链路② 接管时只抓得到
+             「接管之后播放器才请求的切片」，开头那截在接管前就下载完了，
+             永远拿不到。此时 buffered 从 10.36 开始，而 currentTime 还是 0，
+             MSE 不会自己跳过去：数据到了、视频也追上了，音频却还停在 0。
+             主动站到缓冲起点等着，视频一进入这个区间就能立刻出声。 */
+          const b = S.enhAudio.buffered;
+          if (b.length) trySetAudioPos(b.start(0) + 0.05);
+        }
+      }
+    }
     paintRouteMeta();
   }
 

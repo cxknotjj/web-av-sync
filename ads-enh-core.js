@@ -146,6 +146,13 @@
     RESUME_LEAD: 1.5,         /* 缓冲领先目标位置这么多才放开 —— 要比 WAIT_GAP 大得多，
                                  否则一放开走两步又得按住，声音就是一顿一顿的 */
     DRIFT_SEEK: 0.35,         /* 音频位置偏差超过这个才 seek，小偏差用倍速慢慢追 */
+    LOOP_COMP: 0.07,          /* 双向模式的声音要多走一段 tabCapture 回路：
+                                 页面混音 → 捕获 → offscreen DelayNode → 扬声器。
+                                 实测抓取侧 71ms、AudioContext 输出 24ms，减去画面
+                                 渲染的 1~2 帧，取 70ms。让 <audio> 提前这么多，
+                                 到达耳朵时正好对上画面 —— 这段延迟在 DelayNode
+                                 之外，滑块归零也消不掉。单向模式不补（声音直接
+                                 出扬声器，没有这段回路）。 */
     WAIT_STUCK_MS: 4000,      /* 缓冲连续这么久一点没长 = 真下不来了，别等了 */
     WAIT_MAX_MS: 15000,       /* 总等待上限。目标位置迟迟没有数据时，等 15 秒
                                  还没到就认了 —— 再久用户只会觉得播放器坏了 */
@@ -289,9 +296,12 @@
       return;
     }
 
-    /* 卡在 ±4%：seek 失败时偏差可能到 1 秒以上，不夹的话 rate 会跑到
-       0.75 / 1.25 —— 那是听得出来的变速，比不同步还难受。 */
-    const rate = Math.max(0.96, Math.min(1.04, 1 - drift / 4));
+    /* 夹在 ±10%：seek 失败时偏差可能到 1 秒以上，不夹的话 rate 会跑到
+       0.75 / 1.25 —— 那是听得出来的变速，比不同步还难受。
+       原来只给 ±4%：追 1 秒要 25 秒，用户感知就是「一直有延迟」。
+       ±10% 时同样的差距 10 秒能追平，而且 playbackRate 是保音高的
+       time-stretch，短时间用听不太出来。 */
+    const rate = Math.max(0.90, Math.min(1.10, 1 - drift / 6));
     if (Math.abs(S.enhAudio.playbackRate - rate) > 0.005) {
       try { S.enhAudio.playbackRate = rate; } catch (e) {}
     }
@@ -400,7 +410,11 @@
   /** <audio> 该播到哪一秒。只有负值才往前挪，正值交给 DelayNode。 */
   function wantAt(ms) {
     if (!S.videoEl) return 0;
-    return S.videoEl.currentTime - Math.min(0, ms) / 1000;
+    const base = S.videoEl.currentTime - Math.min(0, ms) / 1000;
+    /* 双向模式把补偿加在这里，所有用到「音频该播到哪」的地方就都带着它了：
+       alignAudio 的目标、bufferedHas 的判断、面板的余量，口径一致。
+       单向模式 enhMode 为空、enhanced 为 false，不补。 */
+    return base + (S.enhanced ? C.LOOP_COMP : 0);
   }
 
   function wantTime() {
