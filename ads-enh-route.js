@@ -70,6 +70,12 @@
     S.videoEl = v;
     S.capInitDone = false;
     S.capBytes = 0;
+    /* 链路② 不走「按住画面等缓冲」那套，这三个字段必须归位：
+       audioSilent 是这一轮自己的静音标记，capSeekBytes 是跳转后的字节基准，
+       seekAt 留着旧值会让 captureTick 一上来就判定「已经等了 15 秒」而误降级。 */
+    S.audioSilent = false;
+    S.capSeekBytes = 0;
+    S.seekAt = 0;
     paintRoute();
 
     let fellBack = false;
@@ -240,6 +246,9 @@
 
   E.route = {
     enterEnhanced: enterEnhanced,
-    onSegChunk: onSegChunk
+    onSegChunk: onSegChunk,
+    /* 降级入口。sync 那边发现「跳转后一条新切片都抓不到」时要换到这条，
+       但 sync 在 route 之后加载、只单向依赖 core，所以从这里露出去。 */
+    startViaSrc: startViaSrc
   };
 })();

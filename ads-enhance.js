@@ -59,6 +59,12 @@
     S.capBytes = 0;
     S.seekAt = 0;
     S.trimBusy = false;
+    /* 链路② 的三个状态也要归位：audioSilent 不清，下次进双向会被当成
+       「正在静音」而跳过第一拍的出声；muxer 留着的话，新一路流的 PTS
+       接着旧状态走，第一批切片就会转错。 */
+    S.audioSilent = false;
+    S.capSeekBytes = 0;
+    S.muxer = null;
     S.enhMode = '';
     S.enhanced = false;
 
@@ -159,6 +165,12 @@
     S.capBytes = 0;
     S.seekAt = 0;
     S.trimBusy = false;
+    /* 链路② 的三个状态也要归位：audioSilent 不清，下次进双向会被当成
+       「正在静音」而跳过第一拍的出声；muxer 留着的话，新一路流的 PTS
+       接着旧状态走，第一批切片就会转错。 */
+    S.audioSilent = false;
+    S.capSeekBytes = 0;
+    S.muxer = null;
 
     if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
 

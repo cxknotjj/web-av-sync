@@ -117,6 +117,13 @@
     appendFails: 0,           /* 连续 append 失败计数 */
     appendFailToasted: false, /* 「连续对不上」的提示只弹一次，别刷屏 */
 
+    /* 链路② 的「静音等数据」状态。它和 stalledByUs 是两回事：
+       stalledByUs 会按住视频，链路② 绝不这么做 —— 这条链路的数据来自
+       「播放器请求了哪些切片」，按住播放器等于把自己的数据源掐断。
+       audioSilent 只停音频，画面照常走，几秒后数据到了自己接上。 */
+    audioSilent: false,
+    capSeekBytes: 0,          /* seek 那一刻已解出多少字节，用来判断「一条新片都没来」 */
+
     muxer: null,              /* Transmuxer 单例，见 ads-enh-route.js */
     muxOut: null,             /* 本次 push/flush 的输出，事件回调往里写 */
 
@@ -139,8 +146,13 @@
                                  否则一放开走两步又得按住，声音就是一顿一顿的 */
     DRIFT_SEEK: 0.35,         /* 音频位置偏差超过这个才 seek，小偏差用倍速慢慢追 */
     WAIT_STUCK_MS: 4000,      /* 缓冲连续这么久一点没长 = 真下不来了，别等了 */
-    WAIT_MAX_MS: 15000        /* 总等待上限。目标位置迟迟没有数据时，等 15 秒
+    WAIT_MAX_MS: 15000,       /* 总等待上限。目标位置迟迟没有数据时，等 15 秒
                                  还没到就认了 —— 再久用户只会觉得播放器坏了 */
+
+    CAP_STARVE_MS: 15000      /* 链路② 跳转后这么久一条新切片都没抓到，就当这个
+                                 位置的数据这条链路拿不到，换链路③。
+                                 判据用 capBytes 增长，不用缓冲位置 —— 后者分不清
+                                 「数据在路上」和「数据永远不会来」。 */
   };
 
   function pageIsMSE() {
@@ -263,8 +275,10 @@
 
     if (abs > C.DRIFT_SEEK) {
       try { S.enhAudio.playbackRate = 1; } catch (e) {}
-      seekAudioTo(want);
-      return;
+      if (seekAudioTo(want)) return;
+      /* 目标点还没缓冲到：硬 seek 要么被钳回缓冲末尾，要么卡在空洞里。
+         退一步用倍速把偏差压回来 —— 链路② 的数据是后到的，这个偏差
+         可能持续好几秒，总比放着不管强；数据一到下一拍就正常 seek 了。 */
     }
 
     if (abs < 0.04) {
@@ -274,7 +288,9 @@
       return;
     }
 
-    const rate = 1 - drift / 4;
+    /* 卡在 ±4%：seek 失败时偏差可能到 1 秒以上，不夹的话 rate 会跑到
+       0.75 / 1.25 —— 那是听得出来的变速，比不同步还难受。 */
+    const rate = Math.max(0.96, Math.min(1.04, 1 - drift / 4));
     if (Math.abs(S.enhAudio.playbackRate - rate) > 0.005) {
       try { S.enhAudio.playbackRate = rate; } catch (e) {}
     }
@@ -284,18 +300,48 @@
     if (!S.enhMS || S.enhMS.readyState !== 'open') return;
     let cur;
     try { cur = S.enhMS.duration; } catch (e) { return; }
-    if (!isFinite(cur)) return;          /* NaN / Infinity 都不用管 */
-    if (want + 5 <= cur) return;         /* 本来就在范围里 */
-    try {
-      S.enhMS.duration = Math.max(want + 60, cur + 1);
-    } catch (e) {}
+    if (cur === Infinity) return;        /* 直播流不钉时长，钉了会把时长写死 */
+    if (isFinite(cur) && want + 5 <= cur) return;   /* 本来就在范围里 */
+
+    /* 初始 duration 是 NaN。老代码写的是 !isFinite(cur) 就 return，
+       于是这个函数从来没真正生效过 —— seekable 只跟着 buffered 走，
+       跳转后想把音频位置先摆到目标点都摆不了。NaN 要当成 0 处理。 */
+    const next = Math.max(want + 60, isFinite(cur) ? cur + 1 : 0);
+    try { S.enhMS.duration = next; } catch (e) {}
   }
 
   function seekAudioTo(t) {
-    if (!S.enhAudio) return;
+    if (!S.enhAudio) return false;
     ensureSeekRange(t);
-    if (!bufferedHas(t)) return;
-    try { S.enhAudio.currentTime = t; } catch (e) {}
+    if (!bufferedHas(t)) return false;
+    try { S.enhAudio.currentTime = t; return true; } catch (e) { return false; }
+  }
+
+  /** 把音频位置摆到 t，**不管那里有没有数据** —— 链路② 的「跟着视频移动」。
+   *
+   *  和 seekAudioTo 的分工：那个只在 bufferedHas(t) 为真时才动，用在「已经能播、
+   *  纠一下偏差」的场合；这个是「数据还没来，但位置得先过去」，让媒体元素进入
+   *  seeking，等切片 append 进来后从这个位置自己续播。链路② 跳转后如果不做
+   *  这一步，音频就一直停在旧位置，数据到了也不会自己跳过去。
+   *
+   *  前提是 seekable 覆盖目标点。MSE 的 seekable 默认只跟着 buffered 走，
+   *  所以先 ensureSeekRange 把 duration 撑大。撑不开就返回 false 下一拍再试 ——
+   *  绝不能硬设，硬设会被浏览器钳回缓冲末尾，看着像过去了其实没有。
+   */
+  function trySetAudioPos(t) {
+    if (!S.enhAudio) return false;
+    ensureSeekRange(t);
+
+    let s;
+    try { s = S.enhAudio.seekable; } catch (e) { return false; }
+    let cover = false;
+    for (let i = 0; i < s.length; i++) {
+      if (t >= s.start(i) && t <= s.end(i)) { cover = true; break; }
+    }
+    if (!cover) return false;
+
+    if (Math.abs(S.enhAudio.currentTime - t) < 0.3) return true;
+    try { S.enhAudio.currentTime = t; return true; } catch (e) { return false; }
   }
 
   function trimBuffer() {
@@ -307,7 +353,17 @@
     try { b = S.enhAudio.buffered; } catch (e) { return; }
     if (!b.length) return;
 
-    const keepFrom = S.enhAudio.currentTime - C.KEEP_BEHIND;
+    /* 链路② 的基准要取「视频该播到哪」和「音频实际播到哪」里更小的那个：
+       - 用音频位置（老写法）：seek 之后音频还停在旧位置，会把新位置要用的
+         余量当成历史删掉；
+       - 只用视频位置：音频落后于视频时（数据没跟上），会把音频正在播的
+         那一段当成历史删掉，删完音频当场没数据，越删越卡。
+       取小的那个，两个坑都避开。 */
+    let base = S.enhAudio.currentTime;
+    if (S.enhMode === 'capture' && S.videoEl) {
+      try { base = Math.min(wantTime(), S.enhAudio.currentTime); } catch (e) {}
+    }
+    const keepFrom = base - C.KEEP_BEHIND;
     const firstStart = b.start(0);
     /* 少于 1 秒不值得动一次：remove 会打断 append 的节奏 */
     if (keepFrom - firstStart < 1) return;
@@ -413,6 +469,7 @@
     bufferedEnd: bufferedEnd,
     alignAudio: alignAudio,
     seekAudioTo: seekAudioTo,
+    trySetAudioPos: trySetAudioPos,
     trimBuffer: trimBuffer,
     currentMs: currentMs,
     wantAt: wantAt,

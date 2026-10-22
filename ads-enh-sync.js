@@ -24,7 +24,7 @@
   const C = E.C;
   const {
     pump, bufferedHas, bufferedLead, bufferedEnd,
-    alignAudio, seekAudioTo, trimBuffer, currentMs,
+    alignAudio, seekAudioTo, trySetAudioPos, trimBuffer, currentMs,
     wantAt, wantTime, syncCapturePipe
   } = E.core;
   const { paintRouteMeta, publishState } = E.panel;
@@ -33,10 +33,20 @@
   function onVideoSeek() {
     if (!S.enhanced || !S.videoEl || !S.enhAudio) return;
     S.seekAt = Date.now();
+    S.capSeekBytes = S.capBytes;
 
     /* 旧位置的待 append 片段全丢 —— 它们属于用户已经跳过的那一段。
        不清的话 pump 会一片一片塞进去，正是「强制缓存跳过内容」的来源。 */
     S.appendQueue.length = 0;
+
+    /* PTS 跨段跳变，Transmuxer 内部的 DTS 连续性假设被打破。不重建的话，
+       seek 后第一批切片可能转出错误的时间戳、被 SourceBuffer 拒收 ——
+       表现是「音频一直没有新数据」，和「抓不到切片」长得一模一样。
+       置 null 即可，下一片到达时 getMuxer() 会新建一个。 */
+    if (S.enhMode === 'capture') {
+      S.muxer = null;
+      S.audioSilent = false;   /* 让 captureTick 按新位置重新判定 */
+    }
 
     const want = wantTime();
     try { S.enhAudio.playbackRate = 1; } catch (e) {}
@@ -60,6 +70,11 @@
   }
 
   function stallNow() {
+    /* 链路② 绝不按画面 —— 按住播放器等于断掉它自己的数据源。
+       syncTick 已经把这条链路分流走了，这里只是兜底，防止以后有人
+       在别处直接调 stallNow()。 */
+    if (S.enhMode === 'capture') return;
+
     if (!S.stalledByUs) {
       S.stalledByUs = true;
       S.stallSince = Date.now();
@@ -154,6 +169,99 @@
     paintRouteMeta();
   }
 
+  /** 跳转后这么久一条新切片都没抓到 —— 这个位置的数据这条链路拿不到，
+   *  换链路③（自己重拉一路）。不碰用户的延迟设置，也不按住画面。 */
+  function degradeCapture() {
+    if (S.enhMode !== 'capture') return;
+    const keep = S.videoEl;
+    if (S.ui) S.ui.showToast('这个位置抓不到切片，已改为重新拉一路（约多一倍流量）');
+    L.fail(null, function () {
+      const R = window.ADS && window.ADS.E && window.ADS.E.route;
+      if (!keep || !R || !R.startViaSrc) return;
+      R.startViaSrc(keep);
+      /* exitEnhanced 会把 routeWhy 清空，所以降级原因要在切完之后重写，
+         否则面板上看不出「为什么从链路② 掉到了 ③」。 */
+      S.routeWhy = '跳转后抓不到新切片，已自动降级';
+      publishState();
+    });
+  }
+
+  /** 链路② 的一拍：视频优先，音频异步追，追不上就静音。
+   *
+   *  这条链路没有「等缓冲」这个选项 —— 数据源就是播放器本身，按住画面等于
+   *  断供。所以这里只做三件事：位置跟着 want 走、有数据就出声、没数据就静音。
+   *  视频的暂停只由用户决定，我们绝不主动按。
+   *
+   *  代价是跳转后可能有一小段没声音（播放器正在重新加载新位置的切片）。
+   *  这是刻意接受的：宁可无声几秒，也不让画面卡住十几秒再降档。
+   */
+  function captureTick() {
+    /* 用户自己按的暂停 —— 注意要和「seek 之后卡在等数据」分开：
+       后者 paused 也会变 true（浏览器在无数据的 seeking 里会置位），
+       如果一律当成用户暂停就会直接 return，下面的饥饿检查永远轮不到。 */
+    if (S.videoEl.paused && !S.videoEl.seeking) {
+      if (!S.enhAudio.paused) { try { S.enhAudio.pause(); } catch (e) {} }
+      if (S.audioSilent) { S.audioSilent = false; publishState(); }
+      return;
+    }
+
+    /* 饥饿检查放在最前面：从跳转到现在一条新切片都没抓到，说明这个位置的
+       数据这条链路根本拿不到，早点换链路③，别让用户一直听无声。 */
+    if (S.seekAt && Date.now() - S.seekAt > C.CAP_STARVE_MS &&
+        S.capBytes === S.capSeekBytes) {
+      degradeCapture();
+      return;
+    }
+
+    const want = wantTime();
+    const drift = S.enhAudio.currentTime - want;
+
+    /* ---- 第一档：位置本来就对，剩下交给 alignAudio 微调 ----
+       这一档必须排在最前面。提前模式下 want 经常落在缓冲末尾之外几十毫秒，
+       要是拿 bufferedHas(want) 当唯一判据，就会被误判成「没数据」而反复
+       静音、反复 trySetAudioPos —— 后者会把它硬设到一个暂时没数据的位置，
+       反而卡成 seeking。稳态下声音明明是好的，面板却一直闪「重新加载」。 */
+    if (Math.abs(drift) < 1.0) {
+      if (S.audioSilent) {
+        S.audioSilent = false;
+        publishState();
+      }
+      if (S.enhAudio.paused) {
+        const p = S.enhAudio.play();
+        if (p && p.catch) p.catch(function () {});
+      }
+      alignAudio(want);
+      paintRouteMeta();
+      return;
+    }
+
+    /* ---- 第二档：偏了一大截，但目标点已经有数据 → 直接对齐 ---- */
+    if (bufferedHas(want)) {
+      if (S.audioSilent) {
+        S.audioSilent = false;
+        publishState();
+      }
+      if (S.enhAudio.paused) {
+        const p = S.enhAudio.play();
+        if (p && p.catch) p.catch(function () {});
+      }
+      alignAudio(want);
+      paintRouteMeta();
+      return;
+    }
+
+    /* ---- 第三档：真没数据。静音，但绝不动视频 ----
+       位置朝 want 摆：只有偏差很大时才硬设（seek 之后那种），
+       小偏差由下一拍的 alignAudio 用倍速追，不折腾媒体元素。 */
+    if (!S.audioSilent) {
+      S.audioSilent = true;
+      try { S.enhAudio.pause(); } catch (e) {}
+      publishState();
+    }
+    if (Math.abs(drift) > 2) trySetAudioPos(want);
+    paintRouteMeta();
+  }
+
   function syncTick() {
     if (!S.enhanced || !S.videoEl || !S.enhAudio) return;
     pump();
@@ -164,6 +272,13 @@
     if (syncCapturePipe(currentMs())) publishState();
     /* 顺手把「还能提前多少」刷到面板上 */
     paintRouteMeta();
+
+    /* ---------------- 链路②：视频优先，音频异步追 ----------------
+     * 必须放在等缓冲那一段之前，而且完全不进那一段。
+     * 这条链路的数据全部来自「播放器请求了哪些切片」—— 一旦按住画面，
+     * 播放器就不再发请求，音频永远等不到，等于自己把自己的粮断了。
+     * 详见 captureTick()。 */
+    if (S.enhMode === 'capture') { captureTick(); return; }
 
     /* ---------------- 正在等缓冲 ----------------
      * 这一段必须放在「videoEl.paused 就停音频」前面：等缓冲时视频正是被我们自己

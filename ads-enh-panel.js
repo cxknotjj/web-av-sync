@@ -54,9 +54,6 @@
     const r = ROUTES[S.enhMode];
     if (!r) return;
 
-    const b = S.enhAudio.buffered;
-    const tail = b.length ? b.end(b.length - 1) : 0;
-
     /* 等缓冲时右侧那截改报「还差多少」——不然用户看到「可提前 0.0s」
        却不知道画面为什么要停在那儿 */
     if (S.stalledByUs) {
@@ -70,8 +67,21 @@
       return;
     }
 
-    const ahead = b.length ? Math.max(0, tail - S.videoEl.currentTime) : 0;
-    S.ui.setRouteMeta(r.meta + ' · 可提前 ' + ahead.toFixed(1) + 's');
+    /* 链路② 跳转后音频在重新加载、画面照常走。这时候报「可安全提前 0.0s」
+       会被当成功能坏了，直接说明正在干什么。 */
+    if (S.audioSilent) {
+      S.ui.setRouteMeta(r.meta + ' · 音频重新加载中，画面继续');
+      return;
+    }
+
+    /* 「还能提前多少」= 从画面当前位置往后，音频**连续**供给得了多少秒。
+       老算法用 buffered.end(最后一段) - currentTime，跨空洞时会虚高：
+       seek 之后缓冲是 [0,15] ∪ [60,65]，它会把中间 45 秒的空洞也算进
+       「可提前」里，面板写着「可提前 50s」，实际提前 2 秒就没声。
+       bufferedLead 从当前位置所在的那一段算起，遇洞即止，才是真能用的量。 */
+    const lead = bufferedLead(S.videoEl.currentTime);
+    const ahead = lead > 0 ? lead : 0;
+    S.ui.setRouteMeta(r.meta + ' · 可安全提前 ' + ahead.toFixed(1) + 's');
   }
 
   function publishState() {
@@ -93,6 +103,12 @@
         delayMs: currentMs(),
         stalled: S.stalledByUs,
         bufferedLead: S.enhAudio ? +bufferedLead(wantTime()).toFixed(2) : null,
+        /* 链路② 专用的两个观察点：
+           audioSilent = 正在「静音等数据」（画面没停，只是没声音）
+           capBytes    = 已经解出多少音频字节。跳转后它一直不涨，说明这个位置
+                         的切片根本没抓到，判据比缓冲位置可靠。 */
+        audioSilent: S.audioSilent,
+        capBytes: S.capBytes,
         /* 这一次写给 DelayNode 的值。排查「拖了没反应」时，先看它有没有跟着动：
            null = 还没分配过，负数 = 已归零，正数 = 这个值正在 DelayNode 上 */
         pipeMs: S.pipeMs
