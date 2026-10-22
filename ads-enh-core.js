@@ -80,6 +80,23 @@
     syncTimer: null,
     videoEl: null,
 
+    /* 链路② 的 ts 用的是**原始 PTS**，而页面原生 HLS 的 video.currentTime
+       用的是播放器自己归一化后的时间轴。两者起点常常差一截（实测 1.5~1.6s），
+       这就是「延迟设 0、声音仍固定晚 1.6 秒」的来源：我们一直把 audio.currentTime
+       按 video.currentTime 硬对齐，位置对了，内容却整体晚了一个固定量。
+
+       ptsOffset = 音频时间轴 − 视频时间轴（内容对齐所需的补偿）。
+       由两边的 buffered 末尾差在线估计，取中位数，避免单片抖动。 */
+    ptsOffset: 0,
+    offSamples: [],
+    offLastA: null,
+    offLastV: null,
+    /* 画面自己停住（缓冲断流 / 站点暂停推进）时 paused 仍是 false，
+       currentTime 却不再前进。链路② 若照常放音频，声音会一路跑到画面
+       前面去。这两个字段用来判定「画面是不是冻住了」，见 captureTick。 */
+    vFreezePos: null,
+    vFreezeAt: 0,
+
     /* 当前走的哪条链路，决定退出时要做哪些清理 */
     enhMode: '',
     /* 为什么落到这条链路。用户看到 ③ 却不知道为什么没用更省的那条时，
@@ -123,7 +140,15 @@
        audioSilent 只停音频，画面照常走，几秒后数据到了自己接上。 */
     audioSilent: false,
     silentSince: 0,           /* 这一轮静音从什么时候开始，用来触发「自动降到缓冲撑得住的量」 */
+    /* 这一轮静音最多等多久才降级。播放器自己预缓冲很多时，它根本不会去请求
+       新切片，等 8 秒就降级属于误判 —— 实测站点一次预缓冲了 10 秒，链路②
+       在数据到来前一脚被踢到链路③。按「画面还剩多少缓冲」算等待预算。 */
+    silentLimit: 0,
     capSeekBytes: 0,          /* seek 那一刻已解出多少字节，用来判断「一条新片都没来」 */
+    /* 上一次「把 <audio> 的位置硬摆到未缓冲区间」的时刻。
+       链路② 落后太多时会这么做，但没数据时反复 seek 只会反复打断播放，
+       所以同一个位置 1.5 秒内只摆一次。 */
+    lastPosJump: 0,
 
     muxer: null,              /* Transmuxer 单例，见 ads-enh-route.js */
     muxOut: null,             /* 本次 push/flush 的输出，事件回调往里写 */
@@ -132,6 +157,14 @@
        见 syncCapturePipe()：负值归零、正值由 DelayNode 承担，靠它避免
        每拍重复发消息。 */
     pipeMs: null,
+    /* 写 DelayNode 连续失败几次，以及下次允许重试的时刻。
+       消息发出去不等于到了：SW 冷启动、offscreen 正在重建的那个窗口里，
+       setDelay 会返回 ok:false（甚至直接被 reject）。以前没人看返回值，
+       pipeMs 照样记成「新值」，之后每一拍都被 20ms 阈值挡掉 ——
+       DelayNode 就永久停在旧值上。这就是「点归零，面板 0.000，
+       声音还晚一截」。见 pushDelay()。 */
+    pipeFails: 0,
+    pipeRetryAt: 0,
 
     modeTimer: null           /* 地址从空变成有，需要轮询一段时间 */
   };
@@ -283,23 +316,128 @@
     return b.length ? b.end(b.length - 1) : 0;
   }
 
+  /** 这一轮「静音等数据」最多等多久才降级。
+   *
+   *  链路② 的数据来自播放器请求的切片。播放器自己还有几秒预缓冲时，它不会
+   *  去请求下一片，我们自然什么也抓不到 —— 这不是「抓不到数据」，而是
+   *  「还没轮到」。按画面剩余缓冲把等待预算放宽，否则正常的预缓冲会被
+   *  8 秒超时误判成抓取失败，白白降级到双倍流量的链路③（实测站点一次
+   *  预缓冲 10 秒，链路② 在数据到来前一秒被踢走）。
+   *  上限 20 秒：真抓不到时也不能让用户一直无声。 */
+  function silenceBudget() {
+    let ms = C.CAP_SILENT_MAX_MS;
+    if (!S.videoEl) return ms;
+    try {
+      const b = S.videoEl.buffered;
+      if (b.length) {
+        const lead = b.end(b.length - 1) - S.videoEl.currentTime;
+        if (lead > 0.5) ms = Math.max(ms, Math.min(20000, lead * 1000 + 4000));
+      }
+    } catch (e) {}
+    return ms;
+  }
+
+  /* ---------------- 链路② 的时间轴校准 ----------------
+   *
+   * 页面下载的 ts 带着原始 PTS，我们原样 append 进自己的 MediaSource；
+   * 而原生 HLS 播放器的 video.currentTime 是它自己归一化过的。两边速率一样，
+   * 差的是**常量**。固定常量会导致「位置对齐、内容错位」，听感就是固定延迟。
+   *
+   * 估计办法：两边缓冲的**末尾**对应同一批已下载切片。等两边都比上次长了，
+   * 取 (音频末尾 − 视频末尾) 作为一个样本；中位数滤波后作为补偿量。
+   * 只取「两边同时增长」的拍，避免一边领先一片时算出错的样本。
+   */
+  function resetPtsOffset() {
+    S.ptsOffset = 0;
+    S.offSamples = [];
+    S.offLastA = null;
+    S.offLastV = null;
+    /* 时间轴换了，画面冻结判定也要从零开始 */
+    S.vFreezePos = null;
+    S.vFreezeAt = 0;
+  }
+
+  function samplePtsOffset() {
+    if (S.enhMode !== 'capture' || !S.enhAudio || !S.videoEl) return;
+
+    let a, v;
+    try { a = S.enhAudio.buffered; v = S.videoEl.buffered; } catch (e) { return; }
+    if (!a.length || !v.length) return;
+
+    const ae = a.end(a.length - 1);
+    const ve = v.end(v.length - 1);
+
+    /* 第一次只记基准，不出样本 */
+    if (S.offLastA === null || S.offLastV === null) {
+      S.offLastA = ae;
+      S.offLastV = ve;
+      return;
+    }
+
+    const da = ae - S.offLastA;
+    const dv = ve - S.offLastV;
+    /* 两边都没长，或者只有一边长：现在取样会把「谁先 append」算进偏移里 */
+    if (da < 0.05 || dv < 0.05) return;
+
+    S.offLastA = ae;
+    S.offLastV = ve;
+
+    /* 增长量差得太多说明至少有一边跨了不止一片，这一拍不可比 */
+    if (Math.abs(da - dv) > 0.3) return;
+
+    const sample = ae - ve;
+    if (!isFinite(sample) || Math.abs(sample) > 10) return;
+
+    S.offSamples.push(sample);
+    if (S.offSamples.length > 9) S.offSamples.shift();
+
+    const sorted = S.offSamples.slice().sort(function (x, y) { return x - y; });
+    const med = sorted[Math.floor(sorted.length / 2)];
+    const spread = sorted[sorted.length - 1] - sorted[0];
+    /* 样本太散（切线路 / 不连续）就先不跟，等稳定；稍有变化才更新 */
+    if (spread > 0.5) return;
+    if (Math.abs(med - S.ptsOffset) > 0.02) S.ptsOffset = med;
+  }
+
   function alignAudio(want) {
     const drift = S.enhAudio.currentTime - want;
     const abs = Math.abs(drift);
 
     if (abs > C.DRIFT_SEEK) {
       try { S.enhAudio.playbackRate = 1; } catch (e) {}
-      if (seekAudioTo(want)) return;
-      /* 目标点还没缓冲到：硬 seek 要么被钳回缓冲末尾，要么卡在空洞里。
-         退一步用倍速把偏差压回来 —— 链路② 的数据是后到的，这个偏差
-         可能持续好几秒，总比放着不管强；数据一到下一拍就正常 seek 了。 */
+      if (seekAudioTo(want)) return true;
+
+      /* 目标点还没缓冲到。链路② 的数据是后到的，这里如果只靠 ±10% 倍速，
+         落后 1.5 秒要追 15 秒 —— 用户感知就是「一直差着一截，怎么调都回不去」。
+         位置先过去：MSE 的 seekable 已经被 ensureSeekRange 撑到目标点，
+         设 currentTime 会让它进入 seeking，数据一 append 就从这里续播。
+         这比慢速追赶快一个数量级，代价是那一小段没声音 —— 链路② 本来就
+         接受这个代价（见 captureTick 的注释）。
+
+         领先时同样要摆。以前这里写着「只对落后做」，理由是往回 seek 到
+         没数据的区间会 underflow —— 但那只发生在「目标点是历史、已经被
+         trimBuffer 删掉」的时候，那种情况下面 trySetAudioPos 会因为
+         seekable 不覆盖而返回 false，本来就摆不过去。
+         反过来，把负值拖回 0 时 want 会往后移：音频此刻在 vT+提前量，
+         要退回 vT。这一段刚好是 trimBuffer 保留着的历史，能摆进去就得
+         立刻摆 —— 不摆的话只能靠 0.9 倍速磨，1.6 秒要磨 16 秒，
+         听感就是「点了归零，声音还慢一截」。 */
+      if (S.enhMode === 'capture') {
+        if (Date.now() - S.lastPosJump > 800) {
+          if (trySetAudioPos(want)) { S.lastPosJump = Date.now(); return true; }
+        }
+        /* 摆不过去 = 目标点既不在缓冲里、也不在 seekable 里。
+           绝不能就这么播着 —— 那是一直错位，而且倍速磨得越久错得越久。
+           交给 captureTick 静音，等切片到了再对齐开声。 */
+        return false;
+      }
     }
 
     if (abs < 0.04) {
       if (S.enhAudio.playbackRate !== 1) {
         try { S.enhAudio.playbackRate = 1; } catch (e) {}
       }
-      return;
+      return true;
     }
 
     /* 夹在 ±10%：seek 失败时偏差可能到 1 秒以上，不夹的话 rate 会跑到
@@ -311,6 +449,7 @@
     if (Math.abs(S.enhAudio.playbackRate - rate) > 0.005) {
       try { S.enhAudio.playbackRate = rate; } catch (e) {}
     }
+    return true;
   }
 
   function ensureSeekRange(want) {
@@ -380,7 +519,14 @@
     if (S.enhMode === 'capture' && S.videoEl) {
       try { base = Math.min(wantTime(), S.enhAudio.currentTime); } catch (e) {}
     }
-    const keepFrom = base - C.KEEP_BEHIND;
+    /* 保留量要够「归零」时把音频退回去。
+       负值（声音提前）时 want 在视频前面 |ms| 秒，base 也跟着前移，
+       固定只留 3 秒会让缓冲起点正好落在归零后的目标点上 ——
+       seekAudioTo 差那 50ms 过不去，只能靠 0.9 倍速磨十几秒，
+       听感就是「点了归零，声音还慢一截」。
+       按当前延迟量多留一段：拖到 -4 秒就保留 5.5 秒历史，退得回来。 */
+    const back = Math.max(C.KEEP_BEHIND, Math.abs(currentMs()) / 1000 + 1.5);
+    const keepFrom = base - back;
     const firstStart = b.start(0);
     /* 少于 1 秒不值得动一次：remove 会打断 append 的节奏 */
     if (keepFrom - firstStart < 1) return;
@@ -416,7 +562,11 @@
   /** <audio> 该播到哪一秒。只有负值才往前挪，正值交给 DelayNode。 */
   function wantAt(ms) {
     if (!S.videoEl) return 0;
-    const base = S.videoEl.currentTime - Math.min(0, ms) / 1000;
+    let base = S.videoEl.currentTime - Math.min(0, ms) / 1000;
+    /* 链路② 的 ts 是原始 PTS，和页面时间轴差一个常量。
+       不补这一下，位置看着对齐、内容却整体晚一截（实测 1.6s）。
+       其他链路的时间轴天然同源，不能加。 */
+    if (S.enhanced && S.enhMode === 'capture') base += S.ptsOffset;
     /* 双向模式把补偿加在这里，所有用到「音频该播到哪」的地方就都带着它了：
        alignAudio 的目标、bufferedHas 的判断、面板的余量，口径一致。
        单向模式 enhMode 为空、enhanced 为 false，不补。 */
@@ -431,6 +581,10 @@
    *  syncTick 每 250ms 调一次，所以两个分支都要能重复调用而无副作用：
    *  负值只在第一次归零，正值只在数值真的变了（>20ms）才发消息。 */
   function syncCapturePipe(ms) {
+    /* 刚失败过就按退避等一会儿，别每拍都去撞一堵墙。
+       pending 期间 pipeMs 已被 pushDelay 清空，恢复后会自然重发。 */
+    if (S.pipeRetryAt && Date.now() < S.pipeRetryAt) return false;
+
     const prev = S.pipeMs;
 
     if (ms < 0) {
@@ -446,28 +600,67 @@
     return true;
   }
 
+  /** 不管上一次分配成什么，强制再写一遍。
+   *  用在「归零」这种用户能立刻听出来的动作上：正常路径由 20ms 阈值挡重复，
+   *  但只要中途丢过一次消息，pipeMs 就再也对不上 DelayNode 的真实值，
+   *  而阈值恰恰会把纠正的那一次也挡掉。 */
+  function forcePipe(ms) {
+    S.pipeMs = ms;
+    S.pipeRetryAt = 0;
+    S.pipeFails = 0;
+    syncDelayToSw(true, ms);
+  }
+
   /** 退出双向时把分配记录清掉，下次进入重新算一遍 */
   function resetCapturePipe() {
     S.pipeMs = null;
+    S.pipeRetryAt = 0;
+    S.pipeFails = 0;
   }
 
-  function syncDelayToSw(transient, ms) {
+  /** 真正发消息的地方，唯一一处，所有写 DelayNode 的路径都从这里走。
+   *
+   *  以前 sendMessage(...).catch(noop) 就完了 —— 发出去当成功。
+   *  但这条链路有三段（content → SW → offscreen），任何一段抖一下都会失败，
+   *  而失败对用户是「点了归零，声音还晚 1.x 秒」这种完全没有线索的表现。
+   *  所以这里必须看返回值：只有 offscreen 确认收到了同一个值才算数。 */
+  function pushDelay(ms, transient) {
+    const want = Math.round(ms);
     try {
       chrome.runtime.sendMessage({
         target: 'sw',
         type: 'setDelay',
-        delayMs: ms == null ? currentMs() : ms,
+        delayMs: want,
         transient: !!transient
-      }).catch(function () {});
-    } catch (e) {}
+      }).then(function (res) {
+        const got = res && res.delayMs;
+        const ok = !!res && res.ok !== false
+          && (got == null || Math.abs(got - want) <= 20);
+        if (ok) { S.pipeFails = 0; S.pipeRetryAt = 0; return; }
+
+        /* 没到。清掉分配记录，让下一拍重发；连续失败就退避到 2 秒一次，
+           避免 offscreen 真的没了的时候每 250ms 空转。 */
+        S.pipeMs = null;
+        S.pipeFails = Math.min(S.pipeFails + 1, 8);
+        S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
+      }).catch(function () {
+        S.pipeMs = null;
+        S.pipeFails = Math.min(S.pipeFails + 1, 8);
+        S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
+      });
+    } catch (e) {
+      S.pipeMs = null;
+      S.pipeFails = Math.min(S.pipeFails + 1, 8);
+      S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
+    }
+  }
+
+  function syncDelayToSw(transient, ms) {
+    pushDelay(ms == null ? currentMs() : ms, transient);
   }
 
   function bypassCaptureDelay() {
-    try {
-      chrome.runtime.sendMessage({
-        target: 'sw', type: 'setDelay', delayMs: 0, transient: true
-      }).catch(function () {});
-    } catch (e) {}
+    pushDelay(0, true);
   }
 
   /* ---------------- 对外 ----------------
@@ -488,6 +681,9 @@
     bufferedHas: bufferedHas,
     bufferedLead: bufferedLead,
     bufferedEnd: bufferedEnd,
+    silenceBudget: silenceBudget,
+    resetPtsOffset: resetPtsOffset,
+    samplePtsOffset: samplePtsOffset,
     alignAudio: alignAudio,
     seekAudioTo: seekAudioTo,
     trySetAudioPos: trySetAudioPos,
@@ -496,6 +692,7 @@
     wantAt: wantAt,
     wantTime: wantTime,
     syncCapturePipe: syncCapturePipe,
+    forcePipe: forcePipe,
     resetCapturePipe: resetCapturePipe,
     syncDelayToSw: syncDelayToSw,
     bypassCaptureDelay: bypassCaptureDelay

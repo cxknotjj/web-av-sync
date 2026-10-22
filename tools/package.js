@@ -300,7 +300,20 @@ for (const t of TARGETS) {
 
   const out = path.join(DIST, t.out);
   fs.writeFileSync(out, buildZip(entries));
+
+  /* 同时展开一份目录。加载未打包扩展和 test-env 下的诊断脚本都直接读它，
+     以前这里只出 zip，目录是手工留下的旧快照 —— 改了源码、也打了包，
+     测试跑的却还是上一版，排查方向整个被带偏。 */
+  const outDir = path.join(DIST, path.basename(t.out, '.zip'));
+  fs.rmSync(outDir, { recursive: true, force: true });
+  for (const e of entries) {
+    const full = path.join(outDir, e.name);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, e.data);
+  }
+
   const kb = (fs.statSync(out).size / 1024).toFixed(1);
   console.log(`✓ ${t.label}　${entries.length} 个文件　${kb} KB　${t.manifest.permissions.length} 项权限`);
   console.log('  ' + out);
+  console.log('  ' + outDir + path.sep);
 }

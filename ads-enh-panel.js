@@ -22,8 +22,21 @@
   const S = E.S;
   const { pickVideo, pageKind } = window.ADS.detect;
   const {
-    ROUTES, pickRoute, captureEnabled, routeId, bufferedLead, currentMs, wantTime
+    ROUTES, pickRoute, captureEnabled, routeId, bufferedLead, bufferedHas,
+    currentMs, wantTime
   } = E.core;
+
+  /** 缓冲区间压成 "14.77-20.53" 这种短串，写进 adsState 给排查用 */
+  function bufferedRanges() {
+    if (!S.enhAudio) return null;
+    let b;
+    try { b = S.enhAudio.buffered; } catch (e) { return null; }
+    const out = [];
+    for (let i = 0; i < b.length; i++) {
+      out.push(b.start(i).toFixed(2) + '-' + b.end(i).toFixed(2));
+    }
+    return out.join(' ');
+  }
 
   function paintRoute() {
     if (!S.ui) return;
@@ -81,6 +94,19 @@
       return;
     }
 
+    /* 位置还没对上、也没在 seeking：链路② 里这可能是「音频领先，正在等
+       画面追上来」，也可能是「缓冲里没有目标点，正在等切片」。
+       不写出来的话，用户听着有延迟、面板却显示一切正常 ——
+       那比慢半拍更让人摸不着头脑。 */
+    if (S.enhMode === 'capture') {
+      const off = S.enhAudio.currentTime - wantTime();
+      if (Math.abs(off) > 0.4) {
+        S.ui.setRouteMeta(r.meta + ' · 对齐中，'
+          + (off > 0 ? '音频快 ' : '音频慢 ') + Math.abs(off).toFixed(1) + 's');
+        return;
+      }
+    }
+
     /* 「还能提前多少」= 现在这个提前量再往上加多少仍然有声音。
        算法：(音频位置 − 视频位置) + 音频往后还有多少连续缓冲。
 
@@ -94,7 +120,10 @@
     const aT = S.enhAudio.currentTime;
     const vT = S.videoEl.currentTime;
     const lead = bufferedLead(aT);
-    const ahead = lead > 0 ? Math.max(0, (aT - vT) + lead) : 0;
+    /* 链路② 的 aT 是原始 PTS，要先换算回页面时间轴再和 vT 相减，
+       否则「可安全提前」会虚高一个固定偏移（实测 1.6s）。 */
+    const base = S.enhMode === 'capture' ? S.ptsOffset : 0;
+    const ahead = lead > 0 ? Math.max(0, (aT - base - vT) + lead) : 0;
     S.ui.setRouteMeta(r.meta + ' · 可安全提前 ' + ahead.toFixed(1) + 's');
   }
 
@@ -125,7 +154,28 @@
         capBytes: S.capBytes,
         /* 这一次写给 DelayNode 的值。排查「拖了没反应」时，先看它有没有跟着动：
            null = 还没分配过，负数 = 已归零，正数 = 这个值正在 DelayNode 上 */
-        pipeMs: S.pipeMs
+        pipeMs: S.pipeMs,
+        /* 「拖回去却没同步」的现场：归零时音频要往后退，退到哪、有没有数据，
+           全看这三项。bufferedHas 为假说明目标点已经在 MSE 缓冲之外 ——
+           这是 trimBuffer 把历史删过头了，不是 DelayNode 的事。 */
+        want: S.enhAudio ? +wantTime().toFixed(2) : null,
+        hasWant: S.enhAudio ? bufferedHas(wantTime()) : null,
+        aPos: S.enhAudio ? +S.enhAudio.currentTime.toFixed(2) : null,
+        aPaused: S.enhAudio ? S.enhAudio.paused : null,
+        aRate: S.enhAudio ? +S.enhAudio.playbackRate.toFixed(3) : null,
+        aBuf: S.enhAudio ? bufferedRanges() : null,
+        /* 链路② 的时间轴校准结果：音频 PTS 轴比页面时间轴多出的常量。
+           判读「归零仍有固定延迟」时先看它有没有收敛到 1.5~1.6 这一档。 */
+        ptsOffset: +S.ptsOffset.toFixed(3),
+        /* 扩展自己认定的那个 video 的播放位置。页面若有多个 video，
+           主世界 querySelector('video') 可能取到另一个（广告/预加载），
+           排查时用这一项，别用页面里随便取的那个。 */
+        vPos: S.videoEl ? +S.videoEl.currentTime.toFixed(2) : null,
+        vSrc: S.videoEl ? String(S.videoEl.currentSrc || S.videoEl.src || '').slice(0, 80) : null,
+        aEnd: (S.enhAudio && S.enhAudio.buffered.length)
+          ? +S.enhAudio.buffered.end(S.enhAudio.buffered.length - 1).toFixed(2) : null,
+        vEnd: (S.videoEl && S.videoEl.buffered.length)
+          ? +S.videoEl.buffered.end(S.videoEl.buffered.length - 1).toFixed(2) : null
       });
     } catch (e) {}
   }

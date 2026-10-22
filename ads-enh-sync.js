@@ -25,10 +25,15 @@
   const {
     pump, bufferedHas, bufferedLead, bufferedEnd,
     alignAudio, seekAudioTo, trySetAudioPos, trimBuffer, currentMs,
-    wantAt, wantTime, syncCapturePipe
+    wantAt, wantTime, syncCapturePipe, forcePipe, syncDelayToSw,
+    samplePtsOffset, silenceBudget
   } = E.core;
   const { paintRouteMeta, publishState } = E.panel;
   const L = E.life;
+
+  /* adsState 上一次发布的时刻。只在状态跳变时发布会让排查现场过期，
+     见 syncTick 里的每秒刷新。 */
+  let lastPubAt = 0;
 
   function onVideoSeek() {
     if (!S.enhanced || !S.videoEl || !S.enhAudio) return;
@@ -47,6 +52,13 @@
       S.muxer = null;
       S.audioSilent = false;   /* 让 captureTick 按新位置重新判定 */
       S.silentSince = 0;
+      /* 跳转后两边缓冲都换到新位置：基准重取，但已估出的偏移保留，
+         避免每次拖进度条都重新经历一遍校准期。 */
+      S.offLastA = null;
+      S.offLastV = null;
+      S.offSamples = [];
+      S.vFreezePos = null;
+      S.vFreezeAt = 0;
     }
 
     const want = wantTime();
@@ -147,10 +159,7 @@
        syncCapturePipe 的 transient 通道；但要记下分配结果，
        否则下一拍照样再发一遍。 */
     S.pipeMs = target;
-    try {
-      chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: target })
-        .catch(function () {});
-    } catch (e) {}
+    syncDelayToSw(false, target);
 
     if (S.ui) {
       S.ui.showToast(target === 0
@@ -214,6 +223,24 @@
       return;
     }
 
+    /* ---- 画面冻住：音频跟着停 ----
+       播放器断流 / 站点自己暂停推进时 `paused` 仍是 false，只是 currentTime
+       不再前进。链路② 不按画面，但也不能让声音独自往前跑 —— 画面停几秒，
+       声音就甩出几秒，之后只能靠 seek 硬拽回来。
+       连续 0.7 秒没动就停音频；画面一动立刻复位，下一拍照常对齐。 */
+    const vt = S.videoEl.currentTime;
+    if (S.vFreezePos === null || Math.abs(vt - S.vFreezePos) > 0.01) {
+      S.vFreezePos = vt;
+      S.vFreezeAt = Date.now();
+    } else if (Date.now() - S.vFreezeAt > 700) {
+      if (!S.enhAudio.paused) { try { S.enhAudio.pause(); } catch (e) {} }
+      return;
+    }
+
+    /* 每拍校准一次链路② 的 PTS 偏移：ts 的原始时间轴和页面时间轴差一个常量，
+       不补就会「位置对齐、内容固定晚一截」（实测 1.6s）。 */
+    samplePtsOffset();
+
     const want = wantTime();
     const drift = S.enhAudio.currentTime - want;
 
@@ -223,21 +250,34 @@
        静音、反复 trySetAudioPos —— 后者会把它硬设到一个暂时没数据的位置，
        反而卡成 seeking。稳态下声音明明是好的，面板却一直闪「重新加载」。 */
     if (Math.abs(drift) < 1.0) {
-      /* 只有手上真有数据才算「恢复」：位置对但 readyState 还低，说明仍在等
-         第一片。这时候清掉 silentSince 会让下面的静音超时永远数不到 8 秒，
-         表现就是面板一直显示「重新加载中」却永远不降级。 */
-      if (S.audioSilent && S.enhAudio.readyState >= 2) {
-        S.audioSilent = false;
-        S.silentSince = 0;
-        publishState();
+      /* 先对齐，再决定出不出声。
+         alignAudio 返回 false = 位置挪不过去（目标点既不在缓冲里，也不在
+         seekable 里）。这时候把声音放出来就是「一直在错位」：偏差 1 秒以内
+         用 0.9 倍速磨，磨回来要十秒，用户听到的是「点了归零，声音还慢一截」。
+         宁可落下去静音，等切片 append 进来再对齐开声 —— 断一下比错十秒好。 */
+      const ok = alignAudio(want);
+      /* 位置对 ≠ 有声音：trySetAudioPos 能把游标摆到还没数据的区间，
+         这时 readyState 仍是 HAVE_NOTHING，play() 只是挂在 seeking 上。
+         面板会显示「已同步」，用户却听不到声音还找不到原因 —— 之前
+         「一直挂在重新加载中」有一半是这个。所以位置对了还要确认
+         目标点附近真有数据，否则照样按「没数据」处理。 */
+      const hasData = S.enhAudio.readyState >= 2 && bufferedLead(want) > -0.6;
+      if (ok !== false && hasData) {
+        /* 只有手上真有数据才算「恢复」：位置对但 readyState 还低，说明仍在等
+           第一片。这时候清掉 silentSince 会让下面的静音超时永远数不到 8 秒，
+           表现就是面板一直显示「重新加载中」却永远不降级。 */
+        if (S.audioSilent && S.enhAudio.readyState >= 2) {
+          S.audioSilent = false;
+          S.silentSince = 0;
+          publishState();
+        }
+        if (S.enhAudio.paused) {
+          const p = S.enhAudio.play();
+          if (p && p.catch) p.catch(function () {});
+        }
+        paintRouteMeta();
+        return;
       }
-      if (S.enhAudio.paused) {
-        const p = S.enhAudio.play();
-        if (p && p.catch) p.catch(function () {});
-      }
-      alignAudio(want);
-      paintRouteMeta();
-      return;
     }
 
     /* ---- 第二档：偏了一大截，但目标点已经有数据 → 直接对齐 ---- */
@@ -262,6 +302,9 @@
     if (!S.audioSilent) {
       S.audioSilent = true;
       S.silentSince = Date.now();
+      /* 玩家还在预缓冲时，下一片要等它的缓冲快播完才会被请求 —— 等待预算
+         按画面剩余缓冲放宽，别把「还没轮到」误判成「抓不到」。 */
+      S.silentLimit = silenceBudget();
       try { S.enhAudio.pause(); } catch (e) {}
       publishState();
     }
@@ -273,7 +316,8 @@
        就会一直挂着「音频重新加载中」—— 实测限速 12KB/s 时静音了 10.5 秒，
        期间 capBytes 一动不动（一片 173KB，按这个速率要 14 秒才下得完）。
        宁可多一倍流量，也不能让用户听无声。 */
-    if (S.silentSince && Date.now() - S.silentSince > C.CAP_SILENT_MAX_MS) {
+    if (S.silentSince && Date.now() - S.silentSince >
+        (S.silentLimit || C.CAP_SILENT_MAX_MS)) {
       degradeCapture();
       return;
     }
@@ -286,17 +330,16 @@
        链路② 不按住画面，所以这里只改延迟量，既不暂停视频也不退出双向。
        带 transient 是为了不落盘 —— 用户重新进双向时还是他自己设的值。 */
     if (S.silentSince && Date.now() - S.silentSince > 2000) {
-      const budget = bufferedEnd() - S.videoEl.currentTime - 0.8;
+      /* 缓冲末尾是音频 PTS 轴，video.currentTime 是页面轴，两个轴的零点
+         差着 ptsOffset。不减掉这一截，会把「已经播到头」误算成「还能再提前
+         1.6 秒」，降档永远降不到位，声音一直卡在重新加载中。 */
+      const budget = bufferedEnd() - S.ptsOffset - S.videoEl.currentTime - 0.8;
       const target = Math.max(-Math.max(0, budget) * 1000, currentMs());
       if (target > currentMs() + 200) {
         if (S.ui) S.ui.setValue(target);
-        /* 记下分配结果，否则 syncCapturePipe 下一拍还会按旧值再发一遍 */
-        S.pipeMs = target;
-        try {
-          chrome.runtime.sendMessage({
-            target: 'sw', type: 'setDelay', delayMs: target, transient: true
-          }).catch(function () {});
-        } catch (e) {}
+        /* 走 forcePipe 而不是直接 sendMessage：这条通道要和别处一样
+           确认送到了，否则降档会静默失败，面板写着新值、声音还是旧的。 */
+        forcePipe(target);
         if (S.ui) {
           S.ui.showToast('缓冲跟不上，提前量已自动降到 '
             + Math.abs(target / 1000).toFixed(1) + ' 秒');
@@ -316,17 +359,23 @@
     const cur = S.enhAudio.currentTime;
     if (Math.abs(cur - aim) > C.DRIFT_SEEK) {
       if (!seekAudioTo(aim)) {
-        const tail = bufferedEnd();
-        if (tail <= aim + 0.1 && tail > cur + 0.3) {
-          trySetAudioPos(tail - 0.25);
-        } else if (bufferedLead(cur) < -1) {
-          /* 音频位置压根不在任何缓冲区间里 —— 链路② 接管时只抓得到
-             「接管之后播放器才请求的切片」，开头那截在接管前就下载完了，
-             永远拿不到。此时 buffered 从 10.36 开始，而 currentTime 还是 0，
-             MSE 不会自己跳过去：数据到了、视频也追上了，音频却还停在 0。
-             主动站到缓冲起点等着，视频一进入这个区间就能立刻出声。 */
+        if (aim > cur) {
+          /* 落后，而且目标点还没缓冲到 —— 位置先过去（seekable 已经被
+             ensureSeekRange 撑到那儿），等切片 append 进来就从这里续播。
+             老代码是挪到 bufferedEnd()-0.25：那等于把音频扔到缓冲区最边上，
+             下一拍必然 underflow，然后原地干等，落后一点没减小。
+             差得太多（5 秒以上）就别硬跳了，交给上面的降档/降级去处理 ——
+             跳过去也只是把「落后」换成「静音」。 */
+          if (bufferedLead(aim) > -5 && Date.now() - S.lastPosJump > 1500) {
+            if (trySetAudioPos(aim)) S.lastPosJump = Date.now();
+          }
+        } else {
+          /* 领先且目标点在缓冲之外 —— 通常发生在接管的那一刻：音频还停在 0，
+             而缓冲从 10.x 秒才开始（开头那截在接管前就下载完了，永远拿不到）。
+             MSE 不会自己跳过去，主动站到缓冲起点等着，视频一进入这个区间
+             就能立刻出声。 */
           const b = S.enhAudio.buffered;
-          if (b.length) trySetAudioPos(b.start(0) + 0.05);
+          if (b.length && bufferedLead(cur) < -1) trySetAudioPos(b.start(0) + 0.05);
         }
       }
     }
@@ -341,6 +390,13 @@
     /* 滑块可能刚从「提前」拖到「延后」，管子该换人干活了。
        真变了才重发状态 —— publishState 要走一次 pickVideo，别每拍都做。 */
     if (syncCapturePipe(currentMs())) publishState();
+    /* adsState 是排查「固定延迟」的唯一现场（video 位置、PTS 偏移、缓冲）。
+       只在状态跳变时发布的话，现场会停在几秒前，读出来全是过期的。
+       一秒刷一次：开销可以忽略，排查时拿到的是当前值。 */
+    if (Date.now() - lastPubAt > 1000) {
+      lastPubAt = Date.now();
+      publishState();
+    }
     /* 顺手把「还能提前多少」刷到面板上 */
     paintRouteMeta();
 

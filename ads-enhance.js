@@ -28,9 +28,9 @@
   const { pickVideo, pageKind } = window.ADS.detect;
   const {
     pushChunk, syncDelayToSw, currentMs, syncCapturePipe, resetCapturePipe,
-    pageIsMSE, whyNoEnhanced
+    forcePipe, alignAudio, wantTime, pageIsMSE, whyNoEnhanced, resetPtsOffset
   } = E.core;
-  const { updateModeUI } = E.panel;
+  const { updateModeUI, publishState } = E.panel;
   const { syncTick, onVideoSeek } = E.sync;
   const { enterEnhanced } = E.route;
 
@@ -66,6 +66,8 @@
     S.silentSince = 0;
     S.capSeekBytes = 0;
     S.muxer = null;
+    S.lastPosJump = 0;
+    resetPtsOffset();
     S.enhMode = '';
     S.enhanced = false;
 
@@ -173,6 +175,8 @@
     S.silentSince = 0;
     S.capSeekBytes = 0;
     S.muxer = null;
+    S.lastPosJump = 0;
+    resetPtsOffset();
 
     if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
 
@@ -309,6 +313,25 @@
 
       S.ui.bind({
         mode: onModeClick,
+        /* 用户动了滑块就立刻分配一次，不等 syncTick 那 250ms 一拍。
+           点「归零」时面板已经写成 0.000，而声音要等到下一拍才变 ——
+           这一下是听得出来的，尤其是刚从 2 秒拖回来的时候。
+           归零走 forcePipe：正常路径有 20ms 阈值挡重复，但只要中途丢过
+           一次消息，pipeMs 就和 DelayNode 的真实值对不上了，
+           而阈值恰恰会让纠正的那一次也被挡掉。 */
+        value: function (ms) {
+          if (!S.enhanced) return;
+          if (ms === 0) forcePipe(0);
+          else syncCapturePipe(ms);
+          /* 数值一变，目标位置也跟着变：负值（声音提前）时 want 在视频前面
+             |ms| 秒，拖回 0 就得把音频往后退。只把 DelayNode 归零是不够的 ——
+             那条 <audio> 还停在提前的位置上，用户听到的就是「点了归零，
+             声音还慢一截」。这里立刻对一次，不等下一拍。 */
+          if (S.enhAudio) {
+            try { alignAudio(wantTime()); } catch (e) {}
+          }
+          publishState();
+        },
         stop: function () {
           if (S.enhanced) exitEnhanced();
           chrome.runtime.sendMessage({ target: 'sw', type: 'stop' }).catch(function () {});

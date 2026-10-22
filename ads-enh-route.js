@@ -22,7 +22,7 @@
 
   const S = E.S;
   const { pickVideo, pageKind } = window.ADS.detect;
-  const { pump, pickRoute, whyNoEnhanced, pageIsMSE } = E.core;
+  const { pump, pickRoute, whyNoEnhanced, pageIsMSE, resetPtsOffset } = E.core;
   const { paintRoute } = E.panel;
   const L = E.life;
 
@@ -77,6 +77,8 @@
     S.silentSince = 0;
     S.capSeekBytes = 0;
     S.seekAt = 0;
+    /* 新一路流的时间轴可能与页面的偏移不同，从头校准 */
+    resetPtsOffset();
     paintRoute();
 
     let fellBack = false;
@@ -119,6 +121,8 @@
     S.enhMode = 'src';
     S.videoEl = v;
     S.capBytes = 0;
+    /* ③ 的时间轴和页面同源，不需要偏移 */
+    resetPtsOffset();
     paintRoute();
 
     S.enhAudio = document.createElement('audio');

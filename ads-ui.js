@@ -97,6 +97,11 @@
   let onDelay = null;
   let onStop = null;
   let onMode = null;
+  /* 只要值变了就通知一次，不管发不发消息。
+     双向模式下延迟由增强层自己分配给 DelayNode（不走 onDelay），但它同样
+     需要「用户刚动过手」这个信号 —— 否则要等 syncTick 那 250ms 一拍才生效，
+     点「归零」到声音真的变 0 之间有一段听得出来的空档。 */
+  let onValue = null;
 
   function clampMs(v) {
     const n = Number(v);
@@ -165,8 +170,10 @@
 
   let pendingMs = null;
   let sendTimer = null;
+  let flushFails = 0;
 
   function queueDelay(ms) {
+    if (typeof onValue === 'function') onValue(ms);
     /* 双向模式不走 tabCapture，延迟只作用于本地那条 audio 轨，不用通知 SW */
     if (enhanced) return;
     if (typeof onDelay === 'function') { onDelay(ms); return; }
@@ -181,7 +188,28 @@
     pendingMs = null;
     if (ms == null) return;
     chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: ms })
-      .catch(function () {});
+      .then(function (res) {
+        if (res && res.ok !== false) { flushFails = 0; return; }
+        retryFlush(ms);
+      })
+      .catch(function () { retryFlush(ms); });
+  }
+
+  /** 这一下没送到就再送一次。
+   *
+   *  单向下延迟只有这一条通道（content → SW → offscreen），中间任何一段
+   *  抖一下，面板已经写成 0、DelayNode 还停在旧值，用户听到的就是
+   *  「点了归零，声音还晚一截」。以前 .catch(noop) 把失败全吞了，
+   *  这种状态会一直挂到下一次拖动。
+   *
+   *  只在没有更新的值排队时才重试：用户拖着滑块连点时，
+   *  重试旧值会把面板和声音拉回去。 */
+  function retryFlush(ms) {
+    if (pendingMs != null) return;
+    if (flushFails >= 6) { flushFails = 0; return; }
+    flushFails++;
+    pendingMs = ms;
+    if (!sendTimer) sendTimer = setTimeout(flush, 200 * flushFails);
   }
 
   /* ---------------- 交互 ---------------- */
@@ -385,6 +413,7 @@
       if (handlers.delay) onDelay = handlers.delay;
       if (handlers.stop) onStop = handlers.stop;
       if (handlers.mode) onMode = handlers.mode;
+      if (handlers.value) onValue = handlers.value;
     }
   };
 
