@@ -22,7 +22,8 @@
 
   const S = E.S;
   const { pickVideo, pageKind } = window.ADS.detect;
-  const { pump, pickRoute, whyNoEnhanced, pageIsMSE, resetPtsOffset } = E.core;
+  const { pump, pickRoute, whyNoEnhanced, pageIsMSE, resetPtsOffset, segDir,
+    wantTime, trySetAudioPos } = E.core;
   const { paintRoute } = E.panel;
   const L = E.life;
 
@@ -77,8 +78,15 @@
     S.silentSince = 0;
     S.capSeekBytes = 0;
     S.seekAt = 0;
+    /* 新一轮接管，上一轮的提示状态不要带过来 */
+    S.adToastAt = 0;
+    S.resumeNotice = false;
+    S.swapAt = 0;
     /* 新一路流的时间轴可能与页面的偏移不同，从头校准 */
     resetPtsOffset();
+    /* 锁定主切片目录（广告插播的切片来自另一条路径，onSegChunk 会挡掉） */
+    S.capBase = segDir(v.currentSrc || v.src);
+    S.capSrc = String(v.currentSrc || v.src || '');
     paintRoute();
 
     let fellBack = false;
@@ -121,6 +129,9 @@
     S.enhMode = 'src';
     S.videoEl = v;
     S.capBytes = 0;
+    /* ③ 不抓切片，广告/换源的提示状态不要带过来 */
+    S.resumeNotice = false;
+    S.swapAt = 0;
     /* ③ 的时间轴和页面同源，不需要偏移 */
     resetPtsOffset();
     paintRoute();
@@ -168,6 +179,58 @@
   function onSegChunk(msg) {
     if (S.enhMode !== 'capture' || !S.enhBuf) return;
 
+    /* ---- 只认主切片 ----
+       广告插播时播放器会改拉一条完全不同的切片路径（实测 5:00 站点拉的是
+       /video/adjump/time/178…ts，正片是 /video/<剧集>/<id>/0000…ts）。
+       广告切片带着另一条时间轴，喂给同一个 muxer 会把解复用状态带跑：
+       之后正片切片再进来也解不出音频，表现就是「过 5:00 一直音频重新加载中」，
+       静音超时后再降级到链路③（而 ③ 按 0 秒起播，追不回 5 分钟处，只能退出）。
+       所以异目录的切片一律不解析，只把它记成「广告时段」。 */
+    const dir = segDir(msg.url);
+    if (!S.capBase && dir) S.capBase = dir;
+    if (S.capBase && dir && dir !== S.capBase) {
+      if (!S.capForeignAt) {
+        try {
+          document.documentElement.dataset.adsDiag =
+            ((document.documentElement.dataset.adsDiag || '') + '|ad-skip').slice(-300);
+        } catch (e) {}
+        /* 广告一开始，主音轨就没声了。不解释的话用户只会觉得扩展坏了；
+           提示只发一次，广告结束后音频重新出声时再报一声「已恢复」。 */
+        if (S.ui && Date.now() - S.adToastAt > 15000) {
+          S.adToastAt = Date.now();
+          S.resumeNotice = true;
+          S.ui.showToast('检测到广告插播，声音会暂停，广告结束后自动恢复');
+        }
+      }
+      S.capForeignAt = Date.now();
+      return;
+    }
+    /* 正片切片回来了：广告期间 muxer 没被喂过异源数据，但中间空了一段，
+       重建一次最稳；样本基线也重取（偏移值本身保留，正片时间轴没变）。 */
+    if (S.capForeignAt) {
+      S.capForeignAt = 0;
+      S.muxer = null;
+      S.offLastA = null;
+      S.offLastV = null;
+      S.offSamples = [];
+      /* 广告把页面时间轴整体推后了一个广告时长，旧 PTS 偏移作废。
+         接下来等两边缓冲静止，由 samplePtsOffset 重新量一次。 */
+      S.adResampleUntil = Date.now() + 45000;
+      /* 广告这段静音不算「等不到数据」，从正片回来的这一拍重新计时 */
+      if (S.audioSilent) S.silentSince = Date.now();
+      /* 广告期间正片音轨不会下载，回来时通常已经落后画面一大截（实测 15s+）。
+         这段落后没有追的必要：音频直接站到画面该播的位置，等切片续上；
+         不站过去的话，缓冲只能以略高于 1 倍速往前赶，永远追不回画面。 */
+      if (S.enhAudio) {
+        const aim = wantTime();
+        if (isFinite(aim) && Math.abs(S.enhAudio.currentTime - aim) > 1) {
+          /* 允许接下来 20 秒内跳到「还没缓冲到」的画面位置（平时不允许） */
+          S.adCatchUpUntil = Date.now() + 20000;
+          trySetAudioPos(aim);
+        }
+      }
+    }
+
     /* seek 之前发出的切片请求：那些字节属于用户已经跳过的那一段，
        再 append 进来只会白占 MSE 缓冲（「强制缓存跳过内容」的另一半来源）。
        30ms 容差留给同一毫秒的边界。 */
@@ -202,7 +265,12 @@
     /* init segment 只 append 第一次：同一路流的编码参数不会变，
        重复 append 会让 SourceBuffer 报错。 */
     if (init) { S.appendQueue.push(init); S.capInitDone = true; }
-    if (data) { S.appendQueue.push(data); S.capBytes += data.byteLength; }
+    if (data) {
+      S.appendQueue.push(data);
+      S.capBytes += data.byteLength;
+      /* 数据在源源不断地来：静音只可能是位置还没追上缓冲，不能按「抓不到」降级 */
+      S.capLastAt = Date.now();
+    }
     pump();
 
     if (!S.enhanced && data) {

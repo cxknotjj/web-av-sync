@@ -80,6 +80,17 @@
       return;
     }
 
+    /* 广告插播 / 换源期间主音轨会断一段。明确写出来，别让用户以为扩展坏了。
+       capForeignAt 一直保留到正片切片回来为止，广告中途停顿也不会来回闪。 */
+    if (S.capForeignAt) {
+      S.ui.setRouteMeta(r.meta + ' · 广告插播中，声音稍后恢复');
+      return;
+    }
+    if (S.swapAt && Date.now() - S.swapAt < 10000) {
+      S.ui.setRouteMeta(r.meta + ' · 播放源切换中，正在接音频…');
+      return;
+    }
+
     /* 链路② 跳转后音频在重新加载、画面照常走。这时候报「可安全提前 0.0s」
        会被当成功能坏了，直接说明正在干什么。 */
     if (S.audioSilent) {

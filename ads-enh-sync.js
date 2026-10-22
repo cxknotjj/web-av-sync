@@ -26,7 +26,7 @@
     pump, bufferedHas, bufferedLead, bufferedEnd,
     alignAudio, seekAudioTo, trySetAudioPos, trimBuffer, currentMs,
     wantAt, wantTime, syncCapturePipe, forcePipe, syncDelayToSw,
-    samplePtsOffset, silenceBudget
+    samplePtsOffset, silenceBudget, segDir, resetPtsOffset
   } = E.core;
   const { paintRouteMeta, publishState } = E.panel;
   const L = E.life;
@@ -34,6 +34,20 @@
   /* adsState 上一次发布的时刻。只在状态跳变时发布会让排查现场过期，
      见 syncTick 里的每秒刷新。 */
   let lastPubAt = 0;
+
+  /** 音频重新出声：清静音标记；如果这段中断提示过用户，再报一声恢复。 */
+  function markAudible() {
+    if (!S.audioSilent) return;
+    S.audioSilent = false;
+    S.silentSince = 0;
+    S.swapAt = 0;
+    publishState();
+    if (S.resumeNotice) {
+      S.resumeNotice = false;
+      /* 超过一分钟就别报了：用户早忘了那次中断，突然弹「已恢复」反而莫名其妙 */
+      if (S.ui && Date.now() - S.adToastAt < 60000) S.ui.showToast('声音已恢复');
+    }
+  }
 
   function onVideoSeek() {
     if (!S.enhanced || !S.videoEl || !S.enhAudio) return;
@@ -215,9 +229,42 @@
       return;
     }
 
+    /* ---- 播放器换源（切集 / 切线路 / 广告接管同一个 video）----
+       新的流有自己的时间轴和 PID，旧 muxer / 旧样本基线继续用只会解不出音频。
+       把链路上下文按「重新接管」处理；广告回到正片时 onSegChunk 还会再清一次。 */
+    const src = String(S.videoEl.currentSrc || S.videoEl.src || '');
+    if (S.capSrc && src && src !== S.capSrc) {
+      S.appendQueue.length = 0;
+      S.muxer = null;
+      S.audioSilent = false;
+      S.silentSince = 0;
+      S.capSeekBytes = S.capBytes;
+      S.lastPosJump = 0;
+      /* 换源会让声音断一下，得给用户一句解释（和广告共用 15 秒冷却） */
+      if (S.ui && Date.now() - S.adToastAt > 15000) {
+        S.adToastAt = Date.now();
+        S.resumeNotice = true;
+        S.swapAt = Date.now();
+        S.ui.showToast('视频源已切换，正在重新接入音频…');
+      } else {
+        S.swapAt = Date.now();
+      }
+      resetPtsOffset();
+      /* resetPtsOffset 会把锁定清空，按新地址重新锁 */
+      S.capBase = segDir(src);
+      S.capSrc = src;
+    }
+
+    /* 广告插播期间（抓到过异目录切片）：正片音轨本来就不会有新数据。
+       下面的「抓不到切片」和「静音太久」两个降级判据都要暂停计时。 */
+    const adGrace = S.capForeignAt && Date.now() - S.capForeignAt < C.AD_GRACE_MS;
+    /* 切片还在持续解出音频：这段静音是「位置在缓冲前面等数据」，不是抓不到。
+       此时降级到③只会更糟（③ 从 0 秒起播，在几分钟处根本追不回来）。 */
+    const feeding = S.capLastAt && Date.now() - S.capLastAt < 3000;
+
     /* 饥饿检查放在最前面：从跳转到现在一条新切片都没抓到，说明这个位置的
        数据这条链路根本拿不到，早点换链路③，别让用户一直听无声。 */
-    if (S.seekAt && Date.now() - S.seekAt > C.CAP_STARVE_MS &&
+    if (!adGrace && !feeding && S.seekAt && Date.now() - S.seekAt > C.CAP_STARVE_MS &&
         S.capBytes === S.capSeekBytes) {
       degradeCapture();
       return;
@@ -266,11 +313,7 @@
         /* 只有手上真有数据才算「恢复」：位置对但 readyState 还低，说明仍在等
            第一片。这时候清掉 silentSince 会让下面的静音超时永远数不到 8 秒，
            表现就是面板一直显示「重新加载中」却永远不降级。 */
-        if (S.audioSilent && S.enhAudio.readyState >= 2) {
-          S.audioSilent = false;
-          S.silentSince = 0;
-          publishState();
-        }
+        if (S.audioSilent && S.enhAudio.readyState >= 2) markAudible();
         if (S.enhAudio.paused) {
           const p = S.enhAudio.play();
           if (p && p.catch) p.catch(function () {});
@@ -282,11 +325,7 @@
 
     /* ---- 第二档：偏了一大截，但目标点已经有数据 → 直接对齐 ---- */
     if (bufferedHas(want)) {
-      if (S.audioSilent) {
-        S.audioSilent = false;
-        S.silentSince = 0;
-        publishState();
-      }
+      markAudible();
       if (S.enhAudio.paused) {
         const p = S.enhAudio.play();
         if (p && p.catch) p.catch(function () {});
@@ -309,6 +348,13 @@
       publishState();
     }
 
+    /* ---- 广告插播：静音是正常的，别降档也别降级 ----
+       广告切片来自另一条路径（onSegChunk 已挡掉），正片音轨在这段时间
+       本来就不会有新数据。把计时按住，等正片切片回来再重新算 —— 否则
+       广告一播十几秒，正好踩中「静音 8 秒降级③」，而 ③ 从 0 秒起播，
+       在 5 分钟处根本追不回来，只能退出双向。 */
+    if (adGrace && S.audioSilent) S.silentSince = Date.now();
+
     /* ---- 静音太久：换链路③ ----
        上面两条出口都有前提：降档只对负值成立（提前量是 0 或正值时降无可降），
        降级只在「跳转后 15 秒一条新切片都没抓到」时触发（没跳转、或者切片
@@ -316,7 +362,7 @@
        就会一直挂着「音频重新加载中」—— 实测限速 12KB/s 时静音了 10.5 秒，
        期间 capBytes 一动不动（一片 173KB，按这个速率要 14 秒才下得完）。
        宁可多一倍流量，也不能让用户听无声。 */
-    if (S.silentSince && Date.now() - S.silentSince >
+    if (!adGrace && !feeding && S.silentSince && Date.now() - S.silentSince >
         (S.silentLimit || C.CAP_SILENT_MAX_MS)) {
       degradeCapture();
       return;
@@ -329,7 +375,7 @@
 
        链路② 不按住画面，所以这里只改延迟量，既不暂停视频也不退出双向。
        带 transient 是为了不落盘 —— 用户重新进双向时还是他自己设的值。 */
-    if (S.silentSince && Date.now() - S.silentSince > 2000) {
+    if (!adGrace && !feeding && S.silentSince && Date.now() - S.silentSince > 2000) {
       /* 缓冲末尾是音频 PTS 轴，video.currentTime 是页面轴，两个轴的零点
          差着 ptsOffset。不减掉这一截，会把「已经播到头」误算成「还能再提前
          1.6 秒」，降档永远降不到位，声音一直卡在重新加载中。 */
@@ -365,9 +411,15 @@
              老代码是挪到 bufferedEnd()-0.25：那等于把音频扔到缓冲区最边上，
              下一拍必然 underflow，然后原地干等，落后一点没减小。
              差得太多（5 秒以上）就别硬跳了，交给上面的降档/降级去处理 ——
-             跳过去也只是把「落后」换成「静音」。 */
-          if (bufferedLead(aim) > -5 && Date.now() - S.lastPosJump > 1500) {
-            if (trySetAudioPos(aim)) S.lastPosJump = Date.now();
+             跳过去也只是把「落后」换成「静音」。
+             例外：广告刚结束的追赶窗口内必须跳过去（见 adCatchUpUntil），
+             否则每拍只能靠略高于 1 倍速挪，永远追不回画面。 */
+          const catchUp = S.adCatchUpUntil && Date.now() < S.adCatchUpUntil;
+          if ((catchUp || bufferedLead(aim) > -5) && Date.now() - S.lastPosJump > 1500) {
+            if (trySetAudioPos(aim)) {
+              S.lastPosJump = Date.now();
+              if (catchUp) S.adCatchUpUntil = 0;
+            }
           }
         } else {
           /* 领先且目标点在缓冲之外 —— 通常发生在接管的那一刻：音频还停在 0，

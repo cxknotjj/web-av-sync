@@ -203,5 +203,22 @@ console.log('\n[7] 两条链路的正负分工（延迟回归的守门断言）'
   check('没有 video 时返回 0', core.wantAt(-3000) === 0, core.wantAt(-3000));
 }
 
+console.log('\n[8] 链路② 主切片目录锁定（广告切片过滤）');
+{
+  /* 5:00 广告插播时，播放器会去拉另一条路径的 ts
+     （实测 /video/adjump/time/1787…ts）。异目录切片绝不能进主 muxer，
+     否则之后正片切片解不出音频，一直「音频重新加载中」。 */
+  const core = env.ADS.E.core;
+  const mainDir = core.segDir('https://cdn.example.com/video/show/abc123/index.m3u8');
+  check('正片目录归一', mainDir === 'https://cdn.example.com/video/show/abc123/', mainDir);
+  check('正片切片与播放列表同目录',
+    core.segDir('https://cdn.example.com/video/show/abc123/0000291.ts') === mainDir);
+  check('广告切片在另一个目录',
+    core.segDir('https://cdn.example.com/video/adjump/time/17873200017900000000.ts') !== mainDir);
+  check('带 query 的切片不影响目录',
+    core.segDir('https://cdn.example.com/video/show/abc123/0000291.ts?token=x') === mainDir);
+  check('坏地址返回空串，不抛异常', core.segDir('') === '');
+}
+
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');
 process.exit(failures === 0 ? 0 : 1);

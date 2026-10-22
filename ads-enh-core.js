@@ -107,6 +107,33 @@
     capBytes: 0,              /* 已经解出多少音频字节，用来判断「真有数据了」 */
     guardMute: null,          /* 接管期间守住「原视频静音」的监听器 */
 
+    /* 链路② 只认「主切片」：广告插播会去拉一条完全不同的切片路径
+       （实测站点是 /video/adjump/time/178…ts，主线是 /video/<剧集>/<id>/0000…ts）。
+       广告切片带着另一条时间轴，喂进主 muxer 会把解复用状态带跑 ——
+       之后主切片再进来也解不出音频，表现就是「过了 5:00 一直音频重新加载中」。
+       capBase 是接管时锁定的主切片目录，capForeignAt 记录最近一次撞到广告切片。 */
+    capBase: '',
+    capSrc: '',               /* 接管时 video 的地址，用来发现播放器换源 */
+    capForeignAt: 0,
+    capLastAt: 0,             /* 最近一次解出音频切片的时刻：数据在来，别当「抓不到」 */
+    /* 广告结束后的一段追赶窗口：音频要直接站到画面位置，允许跳到还没缓冲的
+       区间（平时差 5 秒以上不跳，因为跳过去只会变成静音；广告后不跳永远追不上）。 */
+    adCatchUpUntil: 0,
+    /* 广告插播会把页面时间轴整体推移一个广告时长（实测这次 5:00 的广告把
+       两边的 buffered 末尾差从 +1.7s 变成 −24s）。「同时增长」取样在这段
+       很难错拍对上，改成等两边缓冲都静止后直接量差值，见 samplePtsOffset。 */
+    adResampleUntil: 0,
+    aEndSeen: 0,
+    aEndSeenAt: 0,
+    vEndSeen: 0,
+    vEndSeenAt: 0,
+    /* 广告/换源提示：突然没声却没有解释，用户只会觉得扩展坏了。
+       adToastAt 做冷却（一段广告里只提示一次），resumeNotice 记着
+       「这次中断要报一声恢复」，等音频真的重新出声再提示。 */
+    adToastAt: 0,
+    resumeNotice: false,
+    swapAt: 0,                /* 最近一次播放器换源的时刻，面板短暂显示「切换中」 */
+
     /* 等缓冲：要提前的量超过已下载的量时，音频会 underflow（画面在走、没声音）。
        这时由我们主动按住视频，等音频追上来再放开。stalledByUs 必须记住
        「这次暂停是自己按的」，否则下一拍会被当成用户暂停，永远放不开。 */
@@ -194,12 +221,15 @@
                                  位置的数据这条链路拿不到，换链路③。
                                  判据用 capBytes 增长，不用缓冲位置 —— 后者分不清
                                  「数据在路上」和「数据永远不会来」。 */
-    CAP_SILENT_MAX_MS: 8000   /* 静音多久就认赔、换链路③。前两条出口都有前提：
+    CAP_SILENT_MAX_MS: 8000,  /* 静音多久就认赔、换链路③。前两条出口都有前提：
                                  降档只对负值有效（提前量是 0 或正值时降无可降），
                                  降级只在「跳转后 15 秒没抓到新切片」时触发（没跳转
-                                 或切片在慢慢来就不成立）。缺了这一条，用户把滑块
+                                 或切片在慢慢来都不成立）。缺了这一条，用户把滑块
                                  放在 0 或正值时就会一直挂着「音频重新加载中」。
                                  宁可多一倍流量，也不能让用户听无声。 */
+    AD_GRACE_MS: 4000         /* 抓到的切片来自别的目录（广告插播）时，主音轨
+                                 本来就不会有新数据。这段时间内的静音不算「等
+                                 不到数据」，不降档也不降级；广告结束后重新计时。 */
   };
 
   function pageIsMSE() {
@@ -316,6 +346,23 @@
     return b.length ? b.end(b.length - 1) : 0;
   }
 
+  /** 切片 URL 归一到「目录」：协议 + 主机 + 路径目录。
+   *
+   *  广告插播时播放器会改拉一条完全不同的切片路径（实测站点主线是
+   *  /video/<剧集>/<id>/0000xx.ts，广告是 /video/adjump/time/1787…ts）。
+   *  广告切片带着另一条时间轴，绝不能喂给主 muxer；只靠这个目录就能把
+   *  两类切片分开，而且不依赖站点具体命名。 */
+  function segDir(url) {
+    try {
+      const base = (typeof location !== 'undefined' && location.href) ? location.href : undefined;
+      const u = new URL(String(url), base);
+      const p = u.pathname;
+      return u.origin + p.slice(0, p.lastIndexOf('/') + 1);
+    } catch (e) {
+      return '';
+    }
+  }
+
   /** 这一轮「静音等数据」最多等多久才降级。
    *
    *  链路② 的数据来自播放器请求的切片。播放器自己还有几秒预缓冲时，它不会
@@ -355,6 +402,17 @@
     /* 时间轴换了，画面冻结判定也要从零开始 */
     S.vFreezePos = null;
     S.vFreezeAt = 0;
+    /* 流本身换了，主切片目录的锁定也要重来（广告插播不算换流，见 onSegChunk） */
+    S.capBase = '';
+    S.capSrc = '';
+    S.capForeignAt = 0;
+    S.capLastAt = 0;
+    S.adCatchUpUntil = 0;
+    S.adResampleUntil = 0;
+    S.aEndSeen = 0;
+    S.aEndSeenAt = 0;
+    S.vEndSeen = 0;
+    S.vEndSeenAt = 0;
   }
 
   function samplePtsOffset() {
@@ -366,6 +424,38 @@
 
     const ae = a.end(a.length - 1);
     const ve = v.end(v.length - 1);
+
+    /* 记下两端「最后一次变化」的时刻，广告后要用静止差值重采样 */
+    const now = Date.now();
+    if (ae !== S.aEndSeen) { S.aEndSeen = ae; S.aEndSeenAt = now; }
+    if (ve !== S.vEndSeen) { S.vEndSeen = ve; S.vEndSeenAt = now; }
+
+    /* ---- 广告后的重采样 ----
+       广告插播会把页面时间轴整体推移一个广告时长，两边 buffered 末尾的差
+       会从 +1.7s 直接变成 −20s 这类大值；「同时增长」取样在这段时间常常
+       错拍（画面一次缓冲一大段、音频在慢慢追），根本对不上。
+       广告结束后等两边缓冲都静止 1.2 秒，直接量末尾差 —— 此时两边拿到的是
+       同一条正片切片的末尾，差值就是新的 PTS 偏移。 */
+    if (S.adResampleUntil && now < S.adResampleUntil &&
+        now - S.aEndSeenAt > 1200 && now - S.vEndSeenAt > 1200 &&
+        now - S.vFreezeAt < 1500 &&
+        (!S.capForeignAt || now - S.capForeignAt > 2000)) {
+      const sample = ae - ve;
+      S.adResampleUntil = 0;
+      S.offSamples = [];
+      S.offLastA = null;
+      S.offLastV = null;
+      if (isFinite(sample) && Math.abs(sample) < 180 &&
+          Math.abs(sample - S.ptsOffset) > 0.4) {
+        S.ptsOffset = sample;
+        try {
+          document.documentElement.dataset.adsDiag =
+            ((document.documentElement.dataset.adsDiag || '') +
+              '|ad-off:' + sample.toFixed(1)).slice(-300);
+        } catch (e) {}
+      }
+      return;
+    }
 
     /* 第一次只记基准，不出样本 */
     if (S.offLastA === null || S.offLastV === null) {
@@ -681,6 +771,7 @@
     bufferedHas: bufferedHas,
     bufferedLead: bufferedLead,
     bufferedEnd: bufferedEnd,
+    segDir: segDir,
     silenceBudget: silenceBudget,
     resetPtsOffset: resetPtsOffset,
     samplePtsOffset: samplePtsOffset,
