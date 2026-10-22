@@ -74,13 +74,27 @@
       return;
     }
 
-    /* 「还能提前多少」= 从画面当前位置往后，音频**连续**供给得了多少秒。
-       老算法用 buffered.end(最后一段) - currentTime，跨空洞时会虚高：
-       seek 之后缓冲是 [0,15] ∪ [60,65]，它会把中间 45 秒的空洞也算进
-       「可提前」里，面板写着「可提前 50s」，实际提前 2 秒就没声。
-       bufferedLead 从当前位置所在的那一段算起，遇洞即止，才是真能用的量。 */
-    const lead = bufferedLead(S.videoEl.currentTime);
-    const ahead = lead > 0 ? lead : 0;
+    /* 正在对齐时数字没有意义：currentTime 已经指向目标，数据不一定在那。
+       直接说在干什么，避免又出现一个「0.0s」。 */
+    if (S.enhAudio.seeking) {
+      S.ui.setRouteMeta(r.meta + ' · 对齐中…');
+      return;
+    }
+
+    /* 「还能提前多少」= 现在这个提前量再往上加多少仍然有声音。
+       算法：(音频位置 − 视频位置) + 音频往后还有多少连续缓冲。
+
+       不能直接用 bufferedLead(video.currentTime)：trimBuffer 的 keepFrom
+       正好压在 video.currentTime 上（提前量与 KEEP_BEHIND 相等时两者相等），
+       缓冲起点就在视频位置旁边反复擦边 —— 视频前进一点就跑到区间外，
+       面板瞬间变 0.0s，下一拍又跳回 10s。这就是「一会儿 10s 一会儿 0s」。
+
+       换成从音频自己的位置算，再加回它相对画面的提前量：缓冲起点怎么移动
+       都不影响结果，只跟「音频还能连续播多久」有关。 */
+    const aT = S.enhAudio.currentTime;
+    const vT = S.videoEl.currentTime;
+    const lead = bufferedLead(aT);
+    const ahead = lead > 0 ? Math.max(0, (aT - vT) + lead) : 0;
     S.ui.setRouteMeta(r.meta + ' · 可安全提前 ' + ahead.toFixed(1) + 's');
   }
 
