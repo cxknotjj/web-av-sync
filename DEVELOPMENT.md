@@ -116,30 +116,51 @@ ahead = enhAudio.buffered.end(末尾) - video.currentTime
 | 三条链路各有前提        | **MSE 播放器**（`blob:`）走①，零额外带宽但要授权 + 刷新；**原生 HLS**（`.m3u8`）优先走②，抓不到再退③；**直连 mp4** 只能走③  |
 | 能提前多少取决于缓冲      | 只能提前到「已经下载到」的位置，超出会卡住等数据                                                                                         |
 | 误差几十毫秒          | 每 250ms 校正一次，偏差超过 40ms 才动，实测落在 20\~70ms                                                                          |
-| 和 tabCapture 的关系 | **不互斥**：进入双向模式只是把主视频静音、改由本地音轨出声，tabCapture 链路继续留着——而且此时它承载的正是那条本地音轨（所以它的 DelayNode 必须归零，见下一节）。退出双向时 `videoEl.muted = false`，页面声音原样回来 |
+| 和 tabCapture 的关系 | **不互斥**：进入双向模式只是把主视频静音、改由本地音轨出声，tabCapture 链路继续留着——而且此时它承载的正是那条本地音轨（所以两条链路要按符号分工，见下一节）。退出双向时 `videoEl.muted = false`，页面声音原样回来 |
 
-### tabCapture 那条链路在双向模式里只能当「管子」
+### 双向模式里两条链路怎么分工
 
 `tabCapture` 抓的是**整个标签页的混音**，并且把标签页本身的输出静音，声音只能由
 offscreen 里的 DelayNode 送去扬声器。而双向模式放进去的那条 `<audio>` 也是页面元素
-——它同样在这个混音里。
+——它同样在这个混音里。所以两条链路都能产生延迟，不加约束就会做两遍。
 
-所以两条链路的延迟会**叠加**：面板写 1.5 秒，`<audio>` 已经按 1.5 秒排好时间，
-再被 DelayNode 拖 1.5 秒，耳朵听到的是 3 秒。实测确认（`test-env/test-features.js`
-第 5 组）：进双向之前 `delayMs = 1500`，进双向后必须变成 `0`。
+但**「不叠加」不等于「DelayNode 一律归零」**。用哪条，取决于延迟的符号：
 
-修法两条：
+| 面板值 | 谁来做 | DelayNode | `<audio>` 位置 |
+| --- | --- | --- | --- |
+| 负值（声音提前） | `<audio>` 往前挪 | **0** | `video.currentTime + \|ms\|/1000` |
+| 正值（声音延后） | DelayNode | **ms** | `video.currentTime`（贴画面） |
 
-- `enhReady()` 里 `bypassCaptureDelay()`：给 SW 发 `{type:'setDelay', delayMs:0,
-  transient:true}`，把 DelayNode 清零
-- `exitEnhanced()` / `enhFail()` 里 `syncDelayToSw(true)`：把面板值还原回去
+- **负值只能靠 `<audio>`**：DelayNode 没法让声音提前，留着它只会把已经提前的音频
+  再拖回去，两边正好抵消。所以这时候必须归零。
+- **正值交给 DelayNode**：零缓冲消耗、不用提前下载，改一次 `delayTime` 立刻生效。
+  这时候 `<audio>` 只要贴着画面走。
 
-**`transient: true` 是必须的**：`background.setDelay()` 默认会把值写进
-`lastDelayMs`（下次接管沿用）。那个临时 0 不该覆盖用户调好的延迟，所以带 transient
-的调用只改 DelayNode、不落盘。
+判据落在 `ads-enh-core.js` 的两个函数上：`wantTime()` 决定音频该播到哪一秒
+（只对负值减 `|ms|`），`syncCapturePipe(ms)` 决定这一拍该把 DelayNode 设成什么。
 
-副作用是好的：DelayNode 归零后，面板上那个电平条量的就是双向模式下真实的输出电平，
-不会再是一根躺平的线。
+#### 曾经的回归：正值被当成负值处理
+
+早先这里不分符号，`enhReady()` 无条件 `bypassCaptureDelay()`，而 `syncTick` 里
+又照旧用 `want = video.currentTime - currentMs/1000`。两者一叠加，拖任何**正值**
+都会去要「画面之前」的数据 —— 缓冲区里根本没有，于是面板一路挂着
+「等缓冲 · 还差 N 秒」，画面被按住不动，听感上就是**延迟整个失效**。
+
+实测（`test-env/test-features.js` 第 5 组 + 手工探针）：
+
+| 操作 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 拖 +2000 | `stalled=true`，等缓冲还差 2.0s，DelayNode=0 | DelayNode=2000，音频贴画面（drift −0.04s），不等缓冲 |
+| 拖 −3000 | DelayNode=0，drift +2.95s（正确） | 不变 |
+| 拖回 +1500 | 又卡等缓冲 | DelayNode=1500，drift −0.05s |
+
+**`transient: true` 仍然必须**：`background.setDelay()` 默认会把值写进
+`lastDelayMs`（下次接管沿用）。双向期间这些临时值不该覆盖用户调好的延迟，所以带
+transient 的调用只改 DelayNode、不落盘。真正需要持久化的只有 `giveUpWait()`
+那次降档——那是用户看得见的变化，面板数字会跟着变小。
+
+**已知取舍**：正值时音频与画面各自解码，会有几十毫秒的固有偏差，靠 `alignAudio()`
+的倍速微调追平；负值仍然要提前下载，缓冲不够时会按住画面等（见下一节）。
 
 ### 缓冲跟不上提前量时：按住画面等下载
 

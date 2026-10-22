@@ -24,7 +24,8 @@
   const C = E.C;
   const {
     pump, bufferedHas, bufferedLead, bufferedEnd,
-    alignAudio, seekAudioTo, trimBuffer, currentMs
+    alignAudio, seekAudioTo, trimBuffer, currentMs,
+    wantAt, wantTime, syncCapturePipe
   } = E.core;
   const { paintRouteMeta, publishState } = E.panel;
   const L = E.life;
@@ -37,7 +38,7 @@
        不清的话 pump 会一片一片塞进去，正是「强制缓存跳过内容」的来源。 */
     S.appendQueue.length = 0;
 
-    const want = S.videoEl.currentTime - currentMs() / 1000;
+    const want = wantTime();
     try { S.enhAudio.playbackRate = 1; } catch (e) {}
     /* 位置先摆到正确的地方。没缓冲到时 seekAudioTo 会跳过 —— 硬 seek 要么
        被钳回缓冲末尾，要么卡在 seekable 与 buffered 之间的空洞里、从此不再
@@ -64,7 +65,7 @@
       S.stallSince = Date.now();
       S.stallTail = bufferedEnd();
       S.stallTailAt = S.stallSince;
-      S.stallLead = bufferedLead(S.videoEl.currentTime - currentMs() / 1000);
+      S.stallLead = bufferedLead(wantTime());
       /* 全屏时面板多半被收起，画面突然停住得有句话解释，不然像卡死了。
          一次等待只弹一条，且 20 秒冷却 —— 网络差导致连环等待时不刷屏。 */
       if (S.ui && Date.now() - S.lastStallToast > 20000) {
@@ -116,7 +117,7 @@
        （用户跳得太远，或者站点把流切走了）。这时候放开画面就是「画面在走、
        声音没有」，而且下一拍还会再 stall，变成规律的卡顿循环。
        老实退回页面原声，至少声画是配套的。 */
-    const afterGiveUp = bufferedLead(S.videoEl.currentTime - target / 1000);
+    const afterGiveUp = bufferedLead(wantAt(target));
     if (target === currentMs() || afterGiveUp < -C.WAIT_GAP) {
       L.fail('这个位置的音频还没下载到，已退出双向模式，声音回到页面原声。');
       return;
@@ -126,6 +127,10 @@
     S.stallSince = 0;
 
     if (S.ui) S.ui.setValue(target);
+    /* 这次是用户看得见的降档（面板数字跟着变小），要持久化，所以不走
+       syncCapturePipe 的 transient 通道；但要记下分配结果，
+       否则下一拍照样再发一遍。 */
+    S.pipeMs = target;
     try {
       chrome.runtime.sendMessage({ target: 'sw', type: 'setDelay', delayMs: target })
         .catch(function () {});
@@ -137,7 +142,7 @@
         : '缓冲跟不上，提前量已自动降到 ' + Math.abs(target / 1000).toFixed(1) + ' 秒。');
     }
 
-    alignAudio(S.videoEl.currentTime - currentMs() / 1000);
+    alignAudio(wantTime());
     publishState();
     let p = null;
     try { p = S.videoEl.play(); } catch (e) {}
@@ -154,6 +159,9 @@
     pump();
     /* 回收播放位置之前的缓冲：MSE 不会自己释放，不删就一路攒着 */
     trimBuffer();
+    /* 滑块可能刚从「提前」拖到「延后」，管子该换人干活了。
+       真变了才重发状态 —— publishState 要走一次 pickVideo，别每拍都做。 */
+    if (syncCapturePipe(currentMs())) publishState();
     /* 顺手把「还能提前多少」刷到面板上 */
     paintRouteMeta();
 
@@ -161,7 +169,7 @@
      * 这一段必须放在「videoEl.paused 就停音频」前面：等缓冲时视频正是被我们自己
      * 按住的，走下面那条分支只会一直 return，再也没人把它放开。 */
     if (S.stalledByUs) {
-      const need = S.videoEl.currentTime - currentMs() / 1000;
+      const need = wantTime();
       const lead = bufferedLead(need);
       /* 缓冲已经到顶（后面不会再有数据）：剩下这点余量就是全部本钱，
          不能因为差零点几秒达不到 RESUME_LEAD 就一直按着 —— 那会一路等到
@@ -220,10 +228,9 @@
     }
     if (S.enhAudio.paused) S.enhAudio.play().catch(function () {});
 
-    /* currentMs 的语义是「音频延迟量」：正值 = 声音比画面晚，负值 = 提前。
-       所以 audio 要播的位置是 video.currentTime - currentMs/1000：
-       currentMs=-3000 → audio 跑到画面前面 3 秒的内容 → 观众提前 3 秒听到。 */
-    const want = S.videoEl.currentTime - currentMs() / 1000;
+    /* 音频该播到哪一秒由 wantTime() 统一算：负值（提前）往前挪，
+       正值（延后）交给 DelayNode，音频只跟着画面。 */
+    const want = wantTime();
     if (bufferedHas(want)) { alignAudio(want); return; }
 
     /* 目标位置还没缓冲到。差得多 = 下载跟不上设定的提前量。这时如果放任画面

@@ -187,5 +187,21 @@ console.log('\n[6] 依赖缺失时自己早退，不抛异常');
   check('enh 没有硬建', !(solo.ADS && solo.ADS.enh));
 }
 
+console.log('\n[7] 两条链路的正负分工（延迟回归的守门断言）');
+{
+  /* 正值 = 声音延后，交给 DelayNode，音频只跟着画面；
+     负值 = 声音提前，DelayNode 归零，音频往前挪。
+     2026-10-22 之前两边都减 currentMs，正值会去要「更早的数据」，
+     缓冲里没有，于是拖任何正值都卡在「等缓冲 · 还差 N 秒」。 */
+  const core = env.ADS.E.core;
+  const S = env.ADS.E.S;
+  S.videoEl = { currentTime: 100 };
+  check('负值 -3000 → 音频往前 3 秒（103）', core.wantAt(-3000) === 103, core.wantAt(-3000));
+  check('正值 +2000 → 音频贴画面（100）', core.wantAt(2000) === 100, core.wantAt(2000));
+  check('零 → 音频贴画面（100）', core.wantAt(0) === 100, core.wantAt(0));
+  S.videoEl = null;
+  check('没有 video 时返回 0', core.wantAt(-3000) === 0, core.wantAt(-3000));
+}
+
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');
 process.exit(failures === 0 ? 0 : 1);

@@ -22,7 +22,7 @@
   const S = E.S;
   const { pickVideo, pageKind } = window.ADS.detect;
   const {
-    ROUTES, pickRoute, captureEnabled, routeId, bufferedLead, currentMs
+    ROUTES, pickRoute, captureEnabled, routeId, bufferedLead, currentMs, wantTime
   } = E.core;
 
   function paintRoute() {
@@ -60,7 +60,7 @@
     /* 等缓冲时右侧那截改报「还差多少」——不然用户看到「可提前 0.0s」
        却不知道画面为什么要停在那儿 */
     if (S.stalledByUs) {
-      const lead = bufferedLead(S.videoEl.currentTime - currentMs() / 1000);
+      const lead = bufferedLead(wantTime());
       /* -999 是「一段缓冲都没有」的哨兵值，别拿它算成「还差 999 秒」。
          lead 为正 = 数据其实已经够播到目标位置，只是余量还没到 RESUME_LEAD，
          这时候写「还差 0.0s」会让人以为卡死了。 */
@@ -92,7 +92,10 @@
         /* 停在暂停上是不是扩展自己按的（为了等缓冲），别和用户暂停混了 */
         delayMs: currentMs(),
         stalled: S.stalledByUs,
-        bufferedLead: S.enhAudio ? +bufferedLead(v ? v.currentTime - currentMs() / 1000 : 0).toFixed(2) : null
+        bufferedLead: S.enhAudio ? +bufferedLead(wantTime()).toFixed(2) : null,
+        /* 这一次写给 DelayNode 的值。排查「拖了没反应」时，先看它有没有跟着动：
+           null = 还没分配过，负数 = 已归零，正数 = 这个值正在 DelayNode 上 */
+        pipeMs: S.pipeMs
       });
     } catch (e) {}
   }

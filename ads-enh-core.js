@@ -120,6 +120,11 @@
     muxer: null,              /* Transmuxer 单例，见 ads-enh-route.js */
     muxOut: null,             /* 本次 push/flush 的输出，事件回调往里写 */
 
+    /* 上一次写给 DelayNode 的延迟值，null = 本轮还没分配过。
+       见 syncCapturePipe()：负值归零、正值由 DelayNode 承担，靠它避免
+       每拍重复发消息。 */
+    pipeMs: null,
+
     modeTimer: null           /* 地址从空变成有，需要轮询一段时间 */
   };
 
@@ -319,12 +324,62 @@
     return S.ui ? S.ui.getValue() : 0;
   }
 
-  function syncDelayToSw(transient) {
+  /* ---------------- 两条链路怎么分工 ----------------
+   *
+   * 双向模式有两条能产生延迟的路径，用哪条取决于符号：
+   *
+   *   负值（声音提前）—— 只能靠 <audio> 的播放位置往前挪。此时 DelayNode
+   *     必须归零：它只会把已经提前的音频再拖回去，两边正好抵消。
+   *
+   *   正值（声音延后）—— DelayNode 本身就是最省的做法：零缓冲消耗、
+   *     不用提前下载，改一次 delayTime 立刻生效。这时候 <audio> 只要
+   *     贴着画面走（want 不减 currentMs）。
+   *
+   * 早先这里不分符号，进双向一律把 DelayNode 归零，而 want 又照旧减
+   * currentMs/1000 —— 结果是拖任何正值都去要「更早的数据」，缓冲区里
+   * 根本没有，面板一路挂着「等缓冲 · 还差 N 秒」，听感上就是延迟失效。
+   */
+
+  /** <audio> 该播到哪一秒。只有负值才往前挪，正值交给 DelayNode。 */
+  function wantAt(ms) {
+    if (!S.videoEl) return 0;
+    return S.videoEl.currentTime - Math.min(0, ms) / 1000;
+  }
+
+  function wantTime() {
+    return wantAt(currentMs());
+  }
+
+  /** 把「这次该谁干活」落到 DelayNode 上。返回值 = 这次是否真的改了分配。
+   *  syncTick 每 250ms 调一次，所以两个分支都要能重复调用而无副作用：
+   *  负值只在第一次归零，正值只在数值真的变了（>20ms）才发消息。 */
+  function syncCapturePipe(ms) {
+    const prev = S.pipeMs;
+
+    if (ms < 0) {
+      if (prev !== null && prev < 0) return false;   /* 已经归零过，别反复发 */
+      S.pipeMs = ms;
+      bypassCaptureDelay();
+      return true;
+    }
+
+    if (prev !== null && prev >= 0 && Math.abs(prev - ms) < 20) return false;
+    S.pipeMs = ms;
+    syncDelayToSw(true, ms);
+    return true;
+  }
+
+  /** 退出双向时把分配记录清掉，下次进入重新算一遍 */
+  function resetCapturePipe() {
+    S.pipeMs = null;
+  }
+
+  function syncDelayToSw(transient, ms) {
     try {
       chrome.runtime.sendMessage({
         target: 'sw',
         type: 'setDelay',
-        delayMs: currentMs(),
+        delayMs: ms == null ? currentMs() : ms,
         transient: !!transient
       }).catch(function () {});
     } catch (e) {}
@@ -360,6 +415,10 @@
     seekAudioTo: seekAudioTo,
     trimBuffer: trimBuffer,
     currentMs: currentMs,
+    wantAt: wantAt,
+    wantTime: wantTime,
+    syncCapturePipe: syncCapturePipe,
+    resetCapturePipe: resetCapturePipe,
     syncDelayToSw: syncDelayToSw,
     bypassCaptureDelay: bypassCaptureDelay
   };

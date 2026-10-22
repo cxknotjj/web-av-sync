@@ -27,7 +27,7 @@
   const S = E.S;
   const { pickVideo, pageKind } = window.ADS.detect;
   const {
-    pushChunk, syncDelayToSw, bypassCaptureDelay, currentMs,
+    pushChunk, syncDelayToSw, currentMs, syncCapturePipe, resetCapturePipe,
     pageIsMSE, whyNoEnhanced
   } = E.core;
   const { updateModeUI } = E.panel;
@@ -92,6 +92,7 @@
 
     updateModeUI();
     if (msg && S.ui) S.ui.showToast(msg);
+    resetCapturePipe();
     syncDelayToSw(true);
     if (typeof then === 'function') then();
   }
@@ -117,8 +118,11 @@
     S.seekHandler = onVideoSeek;
     try { S.videoEl.addEventListener('seeking', S.seekHandler, true); } catch (e) {}
 
-    /* 管子清零：这条链路的 delayNode 不能和本地音轨的偏移叠加 */
-    bypassCaptureDelay();
+    /* 两条链路按符号分工：负值把 DelayNode 归零、提前量交给 <audio>；
+       正值反过来，由 DelayNode 承担延后，<audio> 贴着画面走。
+       不分符号一律归零的话，拖任何正值都会卡在「等缓冲」。 */
+    resetCapturePipe();
+    syncCapturePipe(currentMs());
 
     if (S.ui) {
       S.ui.setEnhanced(true);
@@ -190,6 +194,7 @@
       S.ui.setEnhanced(false);
     }
     updateModeUI();
+    resetCapturePipe();
     syncDelayToSw(true);
   }
 
