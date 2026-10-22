@@ -175,14 +175,14 @@
   function degradeCapture() {
     if (S.enhMode !== 'capture') return;
     const keep = S.videoEl;
-    if (S.ui) S.ui.showToast('这个位置抓不到切片，已改为重新拉一路（约多一倍流量）');
+    if (S.ui) S.ui.showToast('音频一直等不到数据，已改为重新拉一路（约多一倍流量）');
     L.fail(null, function () {
       const R = window.ADS && window.ADS.E && window.ADS.E.route;
       if (!keep || !R || !R.startViaSrc) return;
       R.startViaSrc(keep);
       /* exitEnhanced 会把 routeWhy 清空，所以降级原因要在切完之后重写，
          否则面板上看不出「为什么从链路② 掉到了 ③」。 */
-      S.routeWhy = '跳转后抓不到新切片，已自动降级';
+      S.routeWhy = '抓不到足够的切片，已自动降级';
       publishState();
     });
   }
@@ -223,7 +223,10 @@
        静音、反复 trySetAudioPos —— 后者会把它硬设到一个暂时没数据的位置，
        反而卡成 seeking。稳态下声音明明是好的，面板却一直闪「重新加载」。 */
     if (Math.abs(drift) < 1.0) {
-      if (S.audioSilent) {
+      /* 只有手上真有数据才算「恢复」：位置对但 readyState 还低，说明仍在等
+         第一片。这时候清掉 silentSince 会让下面的静音超时永远数不到 8 秒，
+         表现就是面板一直显示「重新加载中」却永远不降级。 */
+      if (S.audioSilent && S.enhAudio.readyState >= 2) {
         S.audioSilent = false;
         S.silentSince = 0;
         publishState();
@@ -261,6 +264,18 @@
       S.silentSince = Date.now();
       try { S.enhAudio.pause(); } catch (e) {}
       publishState();
+    }
+
+    /* ---- 静音太久：换链路③ ----
+       上面两条出口都有前提：降档只对负值成立（提前量是 0 或正值时降无可降），
+       降级只在「跳转后 15 秒一条新切片都没抓到」时触发（没跳转、或者切片
+       在慢慢来都不成立）。缺了这一条，用户把滑块归零或放在正值、网络又慢，
+       就会一直挂着「音频重新加载中」—— 实测限速 12KB/s 时静音了 10.5 秒，
+       期间 capBytes 一动不动（一片 173KB，按这个速率要 14 秒才下得完）。
+       宁可多一倍流量，也不能让用户听无声。 */
+    if (S.silentSince && Date.now() - S.silentSince > C.CAP_SILENT_MAX_MS) {
+      degradeCapture();
+      return;
     }
 
     /* ---- 静音两秒还没数据：把提前量降到缓冲撑得住的位置 ----
