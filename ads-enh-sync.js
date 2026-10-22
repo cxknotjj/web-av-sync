@@ -46,6 +46,7 @@
     if (S.enhMode === 'capture') {
       S.muxer = null;
       S.audioSilent = false;   /* 让 captureTick 按新位置重新判定 */
+      S.silentSince = 0;
     }
 
     const want = wantTime();
@@ -201,7 +202,7 @@
        如果一律当成用户暂停就会直接 return，下面的饥饿检查永远轮不到。 */
     if (S.videoEl.paused && !S.videoEl.seeking) {
       if (!S.enhAudio.paused) { try { S.enhAudio.pause(); } catch (e) {} }
-      if (S.audioSilent) { S.audioSilent = false; publishState(); }
+      if (S.audioSilent) { S.audioSilent = false; S.silentSince = 0; publishState(); }
       return;
     }
 
@@ -224,6 +225,7 @@
     if (Math.abs(drift) < 1.0) {
       if (S.audioSilent) {
         S.audioSilent = false;
+        S.silentSince = 0;
         publishState();
       }
       if (S.enhAudio.paused) {
@@ -239,6 +241,7 @@
     if (bufferedHas(want)) {
       if (S.audioSilent) {
         S.audioSilent = false;
+        S.silentSince = 0;
         publishState();
       }
       if (S.enhAudio.paused) {
@@ -255,10 +258,40 @@
        小偏差由下一拍的 alignAudio 用倍速追，不折腾媒体元素。 */
     if (!S.audioSilent) {
       S.audioSilent = true;
+      S.silentSince = Date.now();
       try { S.enhAudio.pause(); } catch (e) {}
       publishState();
     }
-    if (Math.abs(drift) > 2) trySetAudioPos(want);
+
+    /* ---- 静音两秒还没数据：把提前量降到缓冲撑得住的位置 ----
+       不降的话，音频要 video+3 的数据，而缓冲只到 video+1，中间那截永远不来。
+       实测（test-env/diag-starve.js，限速 12KB/s、seek 到 30s）：
+       不降要干等 20.5 秒，降到 0 之后 10 秒就能出声。
+
+       链路② 不按住画面，所以这里只改延迟量，既不暂停视频也不退出双向。
+       带 transient 是为了不落盘 —— 用户重新进双向时还是他自己设的值。 */
+    if (S.silentSince && Date.now() - S.silentSince > 2000) {
+      const budget = bufferedEnd() - S.videoEl.currentTime - 0.8;
+      const target = Math.max(-Math.max(0, budget) * 1000, currentMs());
+      if (target > currentMs() + 200) {
+        if (S.ui) S.ui.setValue(target);
+        /* 记下分配结果，否则 syncCapturePipe 下一拍还会按旧值再发一遍 */
+        S.pipeMs = target;
+        try {
+          chrome.runtime.sendMessage({
+            target: 'sw', type: 'setDelay', delayMs: target, transient: true
+          }).catch(function () {});
+        } catch (e) {}
+        if (S.ui) {
+          S.ui.showToast('缓冲跟不上，提前量已自动降到 '
+            + Math.abs(target / 1000).toFixed(1) + ' 秒');
+        }
+      }
+    }
+
+    /* 降档之后 aim 变了，重新算一次再决定要不要摆位置 */
+    const aim = wantTime();
+    if (Math.abs(S.enhAudio.currentTime - aim) > 2) trySetAudioPos(aim);
     paintRouteMeta();
   }
 

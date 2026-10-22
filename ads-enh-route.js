@@ -74,6 +74,7 @@
        audioSilent 是这一轮自己的静音标记，capSeekBytes 是跳转后的字节基准，
        seekAt 留着旧值会让 captureTick 一上来就判定「已经等了 15 秒」而误降级。 */
     S.audioSilent = false;
+    S.silentSince = 0;
     S.capSeekBytes = 0;
     S.seekAt = 0;
     paintRoute();

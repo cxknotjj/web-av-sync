@@ -122,6 +122,7 @@
        「播放器请求了哪些切片」，按住播放器等于把自己的数据源掐断。
        audioSilent 只停音频，画面照常走，几秒后数据到了自己接上。 */
     audioSilent: false,
+    silentSince: 0,           /* 这一轮静音从什么时候开始，用来触发「自动降到缓冲撑得住的量」 */
     capSeekBytes: 0,          /* seek 那一刻已解出多少字节，用来判断「一条新片都没来」 */
 
     muxer: null,              /* Transmuxer 单例，见 ads-enh-route.js */

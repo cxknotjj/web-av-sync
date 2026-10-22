@@ -63,6 +63,7 @@
        「正在静音」而跳过第一拍的出声；muxer 留着的话，新一路流的 PTS
        接着旧状态走，第一批切片就会转错。 */
     S.audioSilent = false;
+    S.silentSince = 0;
     S.capSeekBytes = 0;
     S.muxer = null;
     S.enhMode = '';
@@ -169,6 +170,7 @@
        「正在静音」而跳过第一拍的出声；muxer 留着的话，新一路流的 PTS
        接着旧状态走，第一批切片就会转错。 */
     S.audioSilent = false;
+    S.silentSince = 0;
     S.capSeekBytes = 0;
     S.muxer = null;
 
