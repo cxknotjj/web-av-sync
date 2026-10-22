@@ -52,8 +52,10 @@ function makeFrame(opts) {
   };
 
   const ui = {
-    reveal: function () { state.visible = true; state.revealed++; },
-    hide: function () { state.visible = false; state.hidden++; },
+    /* 真实面板的 reveal/hide 是幂等的，测试桩也照做，否则「初始化时已经
+       画过一次」会被误算成多画了一次。 */
+    reveal: function () { if (!state.visible) state.revealed++; state.visible = true; },
+    hide: function () { if (!state.visible) return; state.visible = false; state.hidden++; },
     destroy: function () { state.visible = false; },
     setValue: function () {},
     paintMeter: function () {},
@@ -76,7 +78,10 @@ function makeFrame(opts) {
   const chrome = {
     runtime: {
       onMessage: { addListener: function (fn) { state.onRuntimeMsg = fn; } },
-      sendMessage: function () { return Promise.resolve({ active: false, granted: false }); }
+      /* 这些用例模拟的是「已经在接管、后台正在广播 panel-show」的页面。
+         返回 active:false 会让 content.js 按设计把面板和监听器全部拆掉，
+         那样 showPanel 根本到不了这段逻辑。 */
+      sendMessage: function () { return Promise.resolve({ active: true, granted: false }); }
     }
   };
 

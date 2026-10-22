@@ -118,7 +118,10 @@
    *  有 video → 该；没有 video 的子框架 → 不该；顶层 → 等一小会儿，
    *  确认没有子框架认领再兜底（否则父框架会先闪一下再消失）。 */
   function revealPanel() {
-    if (hasVideo()) { U.reveal(); return; }
+    /* 有 video 就先向父框架报到再画：视频可能在 announce 轮询的 40 秒窗口
+       之后才插入，那时父框架早已不再等信号，只 reveal 不报到会让父框架
+       同时画出自己的兜底面板。 */
+    if (hasVideo()) { announceVideo(); U.reveal(); return; }
     if (!isTop()) return;
     if (childHasVideo) return;
     if (fallbackTimer) return;
