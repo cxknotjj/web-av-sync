@@ -1,5 +1,13 @@
 'use strict';
 
+/* 下面这些由 bg-auth.js 提供。Service Worker 的三个文件走 importScripts，
+   共享同一个全局作用域，ESLint 却是按文件分析的 —— 不声明就是一片
+   no-undef。删改 bg-auth.js 里的导出时，记得同步这份清单。 */
+/* global contentScriptFiles, peekPendingEnhance, clearPendingEnhance, clearNeedGesture,
+          pendingCache, PENDING_TTL, settleEnhance, requestEnhanceInline, checkOrigin,
+          registerOnly */
+/* global captureAttach, captureDetach, captureSetPath, captureReattach, readableError */
+
 /* ================================================================
  * 中枢：管理 offscreen 音频文档、页面悬浮面板、状态广播
  *

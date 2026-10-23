@@ -1,0 +1,17 @@
+{
+  "name": "audio-delay-sync",
+  "version": "1.0.1",
+  "private": true,
+  "description": "给当前标签页的声音加可调延迟，修正音画不同步（Chrome / Edge 扩展）",
+  "scripts": {
+    "check": "node tools/check.js",
+    "lint": "eslint .",
+    "test": "node tools/test-modules.js",
+    "build": "node tools/package.js",
+    "ci": "npm run check && npm run lint && npm test && npm run build"
+  },
+  "devDependencies": {
+    "eslint": "^10.13.0",
+    "globals": "^16.0.0"
+  }
+}

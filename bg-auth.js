@@ -1,5 +1,12 @@
 'use strict';
 
+/* sendToTab 在 background.js 里（同一个 SW 全局作用域）；下面几个导出给
+   background.js 的消息分发用，本文件内部不调用。 */
+/* global sendToTab */
+/* exported contentScriptFiles, registerEnhanced, ensureEnhanced, registerOnly,
+            checkOrigin, requestEnhanceInline, settleEnhance, peekPendingEnhance,
+            clearPendingEnhance, clearNeedGesture, pendingCache, PENDING_TTL */
+
 /* ================================================================
  * 站点授权与增强脚本注册
  *

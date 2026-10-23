@@ -1,5 +1,10 @@
 'use strict';
 
+/* 前四个由 background.js 的消息分发调用（同一个 SW 全局作用域）；
+   readableError 反过来是在 background.js 里定义的，本文件直接用了。 */
+/* exported captureAttach, captureDetach, captureSetPath, captureReattach */
+/* global readableError */
+
 /* ================================================================
  * 原生 HLS 抓切片（chrome.debugger 通道）
  *

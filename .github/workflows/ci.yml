@@ -1,0 +1,66 @@
+name: CI
+
+# 每一次推送到主分支、以及每个 PR 都跑一遍。
+# 重点是最后那步「校验产物」：以前出过 dist/ 没更新、测试跑的其实是旧构建，
+# 以及上架包里混进抓切片能力（或清单里留着被裁掉的文件）的情况。
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  verify:
+    name: 检查 · 测试 · 打包
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 静态检查（语法 / 版本一致性 / 注入清单）
+        run: npm run check
+
+      - name: ESLint（未定义变量、未使用变量）
+        run: npm run lint
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 打包
+        run: npm run build
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          echo "版本：$ver"
+          ls -lh dist/*.zip
+
+          test -f "dist/audio-delay-sync-$ver.zip"
+          test -f "dist/audio-delay-sync-$ver-store.zip"
+
+          # 上架版必须没有抓切片能力：没有 debugger 权限、没有 bg-capture.js、
+          # 没有 mux.min.js，构建标记里 capture 为 false
+          test ! -f "dist/audio-delay-sync-$ver-store/bg-capture.js"
+          test ! -f "dist/audio-delay-sync-$ver-store/mux.min.js"
+          grep -q "capture: false" "dist/audio-delay-sync-$ver-store/build-info.js"
+          ! grep -q '"debugger"' "dist/audio-delay-sync-$ver-store/manifest.json"
+
+          # 完整版反过来，三样都得在
+          test -f "dist/audio-delay-sync-$ver/bg-capture.js"
+          test -f "dist/audio-delay-sync-$ver/mux.min.js"
+          grep -q '"debugger"' "dist/audio-delay-sync-$ver/manifest.json"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-packages
+          path: dist/*.zip
+          retention-days: 7

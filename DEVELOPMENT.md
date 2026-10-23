@@ -765,17 +765,63 @@ content.js         内容脚本入口：消息路由、初始化
 inject-main.js     MAIN world：劫持 appendBuffer，复制音频片段给双向模式用
 mux.min.js         原生 HLS 那条链路用来把 ts 转成 fMP4（Apache-2.0，仅完整版）
 icons/             16 / 32 / 48 / 128 四档图标（make-icons.js 生成）
-tools/             图标生成、商店素材生成、打包校验、CDP 加载脚本
+package.json       npm 脚本（check / lint / test / build / ci）与开发依赖
+eslint.config.js   ESLint flat config，只开 no-undef / no-unused-vars
+tools/             图标生成、商店素材生成、静态检查、打包、CDP 加载脚本
+.github/workflows/ci.yml  CI：check → lint → test → build → 校验产物
 store/             商店提交材料：文案、截图、隐私政策
 dist/              打好的提交包（package.js 产出，完整版与上架版各一份）
 ```
 
-后台两个模块用 `importScripts` 挂进 SW，和 `background.js` 共用同一个全局环境；
+后台三个模块用 `importScripts` 挂进 SW，和 `background.js` 共用同一个全局环境；
 内容脚本几个文件则是靠 manifest 的顺序加载，通过 `window.ADS` 串起来。
 
 ***
 
 ## 开发
+
+### 常用命令
+
+```bash
+npm install          # 只装开发依赖：eslint + globals
+npm run check        # 语法 / JSON / 版本一致性 / 注入清单里的文件是否存在
+npm run lint         # 只开 no-undef 和 no-unused-vars 两条规则
+npm test             # 离线单测：模块装配、注入清单、静音恢复、监听器清理…
+npm run build        # 打完整版 + 上架版到 dist/
+npm run ci           # 上面四步串起来，和 GitHub Actions 跑的是同一套
+```
+
+`npm test` **不启浏览器**，所以能在 CI 里跑。需要真机验证时用
+`test-env/` 下的脚本（不进仓库）：
+
+```bash
+node tools/serve-hls.js                                   # 本地 HLS 测试台，端口 8127
+node test-env/diag-zero.js                                # 本地链路② 归零诊断
+PAGE_URL="https://…" AUTHORIZE=1 node test-env/realtest.js # 真实站点验收
+```
+
+几个环境变量：`RESET_PROFILE=1` 重置测试 profile（默认复用，避免每次重建几十 MB）、
+`CLEAN_PROFILE=1` 跑完删掉、`STAGE=inspect` 只看页面结构、`NO_EXT=1` 不加载扩展做对照。
+
+### 为什么 lint 只开两条规则
+
+拆分 `ads-enhance.js` 时，一句 `routeWhy` 漏了 `S.` 前缀，点「启用双向」直接
+ReferenceError —— 这正是 `no-undef` 能当场抓住的问题。风格类规则一律不开：
+这个项目有自己的排版习惯，规则一多，真正的报错会被埋掉。
+
+Service Worker 的三个文件（`background.js` / `bg-auth.js` / `bg-capture.js`）由
+`importScripts` 共享同一个全局作用域，ESLint 却是按文件分析的。所以每个文件顶部
+用 `/* global … */` 和 `/* exported … */` 显式声明跨文件符号 —— **改导出时记得
+同步那份清单**，否则 CI 会报 no-undef。
+
+### CI 校验产物那一步在防什么
+
+以前踩过两次：`dist/` 没重新打包、测试跑的其实是旧构建；以及上架包里混进了
+抓切片能力。所以 `.github/workflows/ci.yml` 打完包会断言：
+
+- 上架版没有 `bg-capture.js` / `mux.min.js` / `debugger` 权限，`build-info.js` 里
+  `capture: false`；
+- 完整版三样都在。
 
 ### 加载未打包扩展：用 Edge，不要用 Chrome
 
