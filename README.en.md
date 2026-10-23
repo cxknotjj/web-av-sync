@@ -220,6 +220,16 @@ Switching tabs stops the previous takeover. In fullscreen the panel follows into
 
 ## Release notes
 
+### 1.0.2
+
+- Segment decoding on Route ② is ~28× faster (11.4 ms → 0.4 ms per 175 KB segment), so high-bitrate sites drop fewer frames
+- mux.js now loads only when bidirectional mode starts, instead of being injected into every page and every iframe (112 KB each)
+- Iframes without a player on authorised sites no longer poll every 0.4 s, which cuts idle background work noticeably
+- While the tab is in the background, state refresh drops from once per second to once every 5 s
+- Fixed leaving bidirectional mode overwriting your own mute state: if the player was already muted, or you muted it yourself mid-session, exiting no longer blasts audio
+- Repeated stop / take-over cycles no longer accumulate event listeners, so long sessions don't degrade
+- The panel's diagnostic fields now include the reason a delay push failed, making "I clicked and nothing happened" much easier to pin down
+
 ### 1.0.1
 
 - Route ② now prefers video and lets audio catch up asynchronously: after a seek the picture no longer freezes waiting for buffer; audio catches up in the background and degrades to Route ③ after 8 s if it can't

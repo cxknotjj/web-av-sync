@@ -16,7 +16,7 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 |---|---|---|---|
 | Name | 音画不同步调节器 | ≤45 字符 | 8 字符，通过 |
 | Description | 接管当前标签页的音频输出做实时延迟，修正音画不同步。页面播放器、进度条、画质切换全部不动。 | ≤132 字符 | 45 字符，通过 |
-| Version | 1.0.1 | `x.y.z` | 通过 |
+| Version | 1.0.2 | `x.y.z` | 通过 |
 
 > 这两项在 `manifest.json` 里，**上传后不可在 Partner Center 修改**。要改必须重打 zip 重新上传。所以文案务必先定稿。
 
@@ -483,7 +483,7 @@ ABOUT THE OPTIONAL BIDIRECTIONAL MODE (the small button on the panel):
 - [ ] `manifest.json` 无 `update_url`
 - [ ] name / description 里没有 "Chrome"、"Firefox"、"Edge 浏览器"等字样（`tools/package.js` 会自动校验）
 - [ ] 四档图标齐全：16 / 32 / 48 / 128
-- [ ] `node tools/package.js` 通过，**上传的是 `dist/audio-delay-sync-1.0.1-store.zip`**
+- [ ] `node tools/package.js` 通过，**上传的是 `dist/audio-delay-sync-1.0.2-store.zip`**
 - [ ] **在真实 Edge 里完整跑通一次**：播放 → 点图标 → 接管 → 调延迟 → 停止
 - [ ] 截图 / 推广图 / logo 齐全
 - [ ] 隐私政策已部署，URL 可访问

@@ -1,6 +1,6 @@
 {
   "name": "audio-delay-sync",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "给当前标签页的声音加可调延迟，修正音画不同步（Chrome / Edge 扩展）",
   "scripts": {
