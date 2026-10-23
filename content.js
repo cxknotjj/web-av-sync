@@ -51,6 +51,10 @@
     if (detached) return;
     detached = true;
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch (e) {}
+    /* 这两个也挂在 window / document 上，不摘就会随每次「停止 → 再接管」
+       累加一份：全屏一次发 N 个 captureReattach、iframe 报到消息被处理 N 遍。 */
+    try { window.removeEventListener('message', onFrameMessage); } catch (e) {}
+    try { document.removeEventListener('fullscreenchange', onFullscreenChange, true); } catch (e) {}
     if (announceTimer) clearInterval(announceTimer);
     if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
   }
@@ -99,7 +103,7 @@
   }, 600);
   setTimeout(function () { clearInterval(announceTimer); }, 40000);
 
-  window.addEventListener('message', function (ev) {
+  function onFrameMessage(ev) {
     const d = ev.data;
     if (!d || d.__ads !== true || d.type !== FRAME_VIDEO) return;
 
@@ -112,7 +116,9 @@
 
     /* 多层 iframe 时继续往上转发，最顶层也要知道下面有人认领了 */
     try { window.parent.postMessage(d, '*'); } catch (e) {}
-  });
+  }
+
+  window.addEventListener('message', onFrameMessage);
 
   /** 该不该由这一层显示面板。
    *  有 video → 该；没有 video 的子框架 → 不该；顶层 → 等一小会儿，
@@ -196,7 +202,7 @@
    *
    * 这里只在真的处于抓切片链路时重连，而且进出全屏都做一遍：
    * MSE 里已经缓冲的音频不受影响，重连后新片接上就恢复。 */
-  document.addEventListener('fullscreenchange', function () {
+  function onFullscreenChange() {
     let capturing = false;
     try { capturing = !!E.isCapturing(); } catch (e) {}
     if (!capturing) return;
@@ -206,7 +212,9 @@
       chrome.runtime.sendMessage({ target: 'sw', type: 'captureReattach', baseDir: baseDir })
         .catch(function () {});
     } catch (e) {}
-  }, true);
+  }
+
+  document.addEventListener('fullscreenchange', onFullscreenChange, true);
 
   /* ---------------- 初始化 ---------------- */
 

@@ -32,11 +32,20 @@ let capSawAny = false;           /* 只用来确认「Network 事件确实通到
    页面那边（S.cap）还会再判一次做兜底。 */
 const capDirs = new Map();       /* tabId -> 目录前缀 */
 const capAdAt = new Map();       /* tabId -> 上次通知页面「广告切片」的时刻 */
+/* tabId -> content 报上来的数字 frameId。内存优先、storage 兜底：
+   每片都要知道「发给哪个 frame」，原来每片都 await 一次
+   storage.session.get，175KB 的切片一秒一片时这笔跨进程往返纯属浪费。
+   SW 被回收后内存会空，重新启动时从 storage 恢复（见 capHydrated）。 */
+const capFrameIds = new Map();
 const capHydrated = (async function () {
   try {
     const all = await chrome.storage.session.get(null);
     for (const k of Object.keys(all || {})) {
       if (k.indexOf('capDir:') === 0 && all[k]) capDirs.set(Number(k.slice(7)), all[k]);
+      /* frameId 可能是 0（顶层 frame），不能用真假判断 */
+      else if (k.indexOf('capFrame:') === 0 && all[k] != null) {
+        capFrameIds.set(Number(k.slice(9)), all[k]);
+      }
     }
   } catch (e) {}
 })();
@@ -76,13 +85,19 @@ function notifyAd(tabId) {
    直接把 CDP 的 frameId 传进去会发不出去。所以记 content 自己报上来的那个。 */
 async function setCapFrame(tabId, frameId) {
   if (tabId == null || frameId == null) return;
+  capFrameIds.set(tabId, frameId);
   try { await chrome.storage.session.set({ ['capFrame:' + tabId]: frameId }); } catch (e) {}
 }
 
 async function getCapFrame(tabId) {
+  const mem = capFrameIds.get(tabId);
+  if (mem !== undefined) return mem;
+  /* 内存里没有 = SW 刚被唤醒。读一次并回填，后面每片都走内存。 */
   try {
     const r = await chrome.storage.session.get('capFrame:' + tabId);
-    return r['capFrame:' + tabId];
+    const id = r['capFrame:' + tabId];
+    if (id != null) { capFrameIds.set(tabId, id); return id; }
+    return undefined;
   } catch (e) { return undefined; }
 }
 
@@ -90,8 +105,22 @@ function isMediaSegment(url) {
   return !!(url && SEG_RE.test(url));
 }
 
-/** 把抓取过程的节点状态回传给页面，面板调试时能直接看到卡在哪一步 */
-function capDiag(tabId, text) {
+/* 逐片诊断消息默认关闭。
+   链路② 原来每片要发 3 条消息（fin / body:N / 切片本体），一次 5 分钟的
+   验证就是上千条 sendMessage，每条都要跨进程序列化一次。
+   要排查时在扩展的 Service Worker 控制台执行：
+     chrome.storage.local.set({ adsDebug: 1 })   // 再刷新页面
+   错误类消息（attach-fail / body-empty）不受这个开关影响，任何时候都会发。 */
+let capDebug = false;
+(async function () {
+  try {
+    const r = await chrome.storage.local.get('adsDebug');
+    capDebug = !!r.adsDebug;
+  } catch (e) {}
+})();
+
+function capDiag(tabId, text, force) {
+  if (!force && !capDebug) return;
   try {
     chrome.tabs.sendMessage(tabId, { target: 'content', type: 'capdiag', text: String(text).slice(0, 60) })
       .catch(function () {});
@@ -107,7 +136,7 @@ async function captureAttach(tabId, frameId, baseDir) {
   try {
     await chrome.debugger.attach({ tabId: tabId }, '1.3');
   } catch (e) {
-    capDiag(tabId, 'attach-fail:' + readableError(e));
+    capDiag(tabId, 'attach-fail:' + readableError(e), true);
     return { ok: false, error: readableError(e) };
   }
 
@@ -117,7 +146,7 @@ async function captureAttach(tabId, frameId, baseDir) {
       maxResourceBufferSize: 16 * 1024 * 1024
     });
     capAttached.set(tabId, true);
-    capDiag(tabId, 'attach-ok');
+    capDiag(tabId, 'attach-ok', true);
     return { ok: true };
   } catch (e) {
     try { await chrome.debugger.detach({ tabId: tabId }); } catch (e2) {}
@@ -130,6 +159,7 @@ async function captureDetach(tabId) {
   capAttached.delete(tabId);
   capDirs.delete(tabId);
   capAdAt.delete(tabId);
+  capFrameIds.delete(tabId);
   for (const [id, rec] of capPending) if (rec.tabId === tabId) capPending.delete(id);
   try { await chrome.storage.session.remove('capFrame:' + tabId); } catch (e) {}
   try { await chrome.storage.session.remove('capDir:' + tabId); } catch (e) {}
@@ -157,7 +187,7 @@ async function captureTake(rec, requestId) {
     return;   /* 请求未完成 / body 已被回收，丢一片不影响后续 */
   }
   if (!r || typeof r.body !== 'string' || !r.body.length) {
-    capDiag(rec.tabId, 'body-empty');
+    capDiag(rec.tabId, 'body-empty', true);
     return;
   }
   capDiag(rec.tabId, 'body:' + r.body.length);

@@ -37,7 +37,8 @@ const ORDER = [
 const SRC = {};
 for (const f of ORDER) SRC[f] = fs.readFileSync(path.join(ROOT, f), 'utf8');
 
-function makeEnv() {
+function makeEnv(opts) {
+  opts = opts || {};
   const calls = [];
 
   function fakeEl() {
@@ -67,7 +68,11 @@ function makeEnv() {
 
   const sandbox = {
     console,
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    setTimeout: opts.setTimeout || setTimeout,
+    clearTimeout: opts.clearTimeout || clearTimeout,
+    setInterval: opts.setInterval || setInterval,
+    clearInterval: opts.clearInterval || clearInterval,
+    Date: opts.Date || Date,
     URL, atob, isFinite,
     location: { origin: 'https://example.com' },
     chrome: { runtime: { sendMessage: () => Promise.resolve({ ok: true }) } },
@@ -328,6 +333,150 @@ console.log('\n[12] 链路① 原始片段缓存（内存回归）');
     S.chunkBytes <= env.ADS.E.C.SEED_CHUNK_BYTES + MB, S.chunkBytes);
   check('第一片 init 不被淘汰', S.chunks[0].byteLength === 1234);
   S.chunks = []; S.chunkBytes = 0; S.appendQueue = [];
+}
+
+console.log('\n[13] 注入清单：mux.js 按需加载，content.js 最后');
+{
+  const src = fs.readFileSync(path.join(ROOT, 'bg-auth.js'), 'utf8');
+  const box = {
+    console,
+    setTimeout, clearTimeout,
+    chrome: {
+      permissions: { onRemoved: null },
+      storage: { session: { get: async () => ({}) }, local: { get: async () => ({}) } },
+      scripting: {}, tabs: {}, action: {}
+    }
+  };
+  vm.createContext(box);
+  vm.runInContext(src, box, { filename: 'bg-auth.js' });
+  const files = box.contentScriptFiles();
+  check('build-info.js 排第一', files[0] === 'build-info.js');
+  check('content.js 排最后', files[files.length - 1] === 'content.js');
+  check('mux.min.js 不预注入（链路② 按需拉）', files.indexOf('mux.min.js') === -1);
+  check('双向五块齐全', ['ads-enh-core.js', 'ads-enh-panel.js', 'ads-enh-route.js',
+    'ads-enh-sync.js', 'ads-enhance.js'].every(function (f) { return files.indexOf(f) >= 0; }));
+}
+
+console.log('\n[14] 退出时恢复接管前的静音状态');
+{
+  const S = env.ADS.E.S;
+  const mkVideo = function (muted) {
+    return {
+      muted: muted, paused: false, currentTime: 0,
+      play: function () { return Promise.resolve(); },
+      addEventListener: function () {}, removeEventListener: function () {}
+    };
+  };
+
+  /* 用户本来就静音：退出后不能突然外放 */
+  let v = mkVideo(true);
+  S.videoEl = v; S.mutedByUs = true; S.prevMuted = true;
+  env.ADS.enh.exit();
+  check('接管前静音 → 退出后仍静音', v.muted === true, v.muted);
+
+  /* 接管前有声：退出后恢复有声 */
+  v = mkVideo(false);
+  S.videoEl = v; S.mutedByUs = true; S.prevMuted = false;
+  env.ADS.enh.exit();
+  check('接管前有声 → 退出后取消静音', v.muted === false, v.muted);
+
+  /* 还没走到静音那一步就失败：不要碰用户的静音开关 */
+  v = mkVideo(true);
+  S.videoEl = v; S.mutedByUs = false; S.prevMuted = false;
+  env.ADS.enh.exit();
+  check('没接管过静音 → 保持用户原状', v.muted === true, v.muted);
+}
+
+console.log('\n[15] content.js 重复注入：监听器能被摘干净');
+{
+  const winAdd = [], winRemove = [], docAdd = [], docRemove = [];
+  const sandbox = {
+    console,
+    setInterval: () => 1,
+    clearInterval: () => {},
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    location: { origin: 'https://example.com' },
+    document: {
+      documentElement: { dataset: {} },
+      querySelectorAll: () => [],
+      addEventListener: (t) => docAdd.push(t),
+      removeEventListener: (t) => docRemove.push(t)
+    },
+    chrome: {
+      runtime: {
+        onMessage: { addListener: () => {}, removeListener: () => {} },
+        sendMessage: () => Promise.resolve({ active: false, granted: false })
+      }
+    },
+    ADS: {
+      ui: {
+        host: { style: { display: 'none' } },
+        setValue() {}, reveal() {}, hide() {}, destroy() {}, showToast() {}
+      },
+      enh: {
+        init() {}, pickVideo: () => null, isEnhanced: () => false, exit() {},
+        isCapturing: () => false, setHookInstalled() {}
+      }
+    }
+  };
+  sandbox.window = sandbox;
+  sandbox.top = sandbox;
+  sandbox.parent = sandbox;
+  sandbox.postMessage = () => {};
+  sandbox.addEventListener = (t) => winAdd.push(t);
+  sandbox.removeEventListener = (t) => winRemove.push(t);
+
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8'), sandbox, { filename: 'content.js' });
+
+  check('window 上装了 message 监听', winAdd.indexOf('message') >= 0, winAdd.join(','));
+  check('document 上装了 fullscreenchange 监听', docAdd.indexOf('fullscreenchange') >= 0, docAdd.join(','));
+
+  sandbox.__adsContentTeardown();
+  check('detach 摘掉 message', winRemove.indexOf('message') >= 0, winRemove.join(','));
+  check('detach 摘掉 fullscreenchange', docRemove.indexOf('fullscreenchange') >= 0, docRemove.join(','));
+}
+
+console.log('\n[16] 空框架的轮询会自己停（退避 + 期限）');
+{
+  const timers = [];
+  let now = 0;
+  const fakeSetTimeout = function (fn, ms) {
+    const id = timers.length + 1;
+    timers.push({ fn: fn, at: now + (ms || 0), done: false, cleared: false });
+    return id;
+  };
+  const fakeClearTimeout = function (id) {
+    if (timers[id - 1]) timers[id - 1].cleared = true;
+  };
+  function advance(ms) {
+    const target = now + ms;
+    for (;;) {
+      let due = null;
+      for (const t of timers) {
+        if (!t.done && !t.cleared && t.at <= target && (!due || t.at < due.at)) due = t;
+      }
+      if (!due) break;
+      now = due.at;
+      due.done = true;
+      due.fn();
+    }
+    now = target;
+  }
+  const FakeDate = function (v) { return v == null ? new Date(now) : new Date(v); };
+  FakeDate.now = function () { return now; };
+
+  const env2 = makeEnv({ setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, Date: FakeDate });
+  run(env2, ORDER);
+  const ui2 = fakeUi();
+  env2.ADS.enh.init(ui2);
+  env2.ADS.enh.setHookInstalled(true);
+  check('没有 video 的框架开始轮询', env2.ADS.E.S.modeTimer !== null);
+
+  advance(35000);
+  check('30 秒等不到 video → 自己停', env2.ADS.E.S.modeTimer === null);
+  check('退避生效（回调次数远小于 400ms 固定间隔）', timers.length < 30, timers.length);
 }
 
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');

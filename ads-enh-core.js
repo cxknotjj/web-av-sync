@@ -106,6 +106,11 @@
     capInitDone: false,       /* 调试通道下，init segment 只需 append 一次 */
     capBytes: 0,              /* 已经解出多少音频字节，用来判断「真有数据了」 */
     guardMute: null,          /* 接管期间守住「原视频静音」的监听器 */
+    /* 接管前视频本来是不是静音、以及「这次静音是我们按下的」标记。
+       退出/失败时只恢复我们改过的那一份 —— 用户原本就静音，或者中途自己
+       点了播放器静音，无条件清零会让声音突然外放。 */
+    prevMuted: false,
+    mutedByUs: false,
 
     /* 链路② 的流身份 / 广告插播状态。字段和方法都收在这个对象里，
        route / sync / panel 只读或调用，不再各自改顶层 S 字段。
@@ -178,6 +183,15 @@
        声音还晚一截」。见 pushDelay()。 */
     pipeFails: 0,
     pipeRetryAt: 0,
+    /* 每次下发延迟都领一个号。回调只认自己那一号：
+       连点「+2000 → 归零」时两条消息都在飞，先发的那条如果回得晚、
+       又恰好失败，会把后一条刚记下的 pipeMs 清成 null ——
+       下一次 publishState 就把「已归零」写成了「还没分配过」，
+       排查的人看到 null 只会以为归零没生效。 */
+    pipeSeq: 0,
+    /* 上一次下发失败的原因，空串 = 没失败过。adsState 里能看到它，
+       排查「pipeMs 一直是 null」时不用再靠猜是超时、还是 offscreen 没起。 */
+    pipeErr: '',
 
     modeTimer: null           /* 地址从空变成有，需要轮询一段时间 */
   };
@@ -354,7 +368,10 @@
 
   function pickRoute(kind) {
     if (S.hookReady && S.chunks.length) return 'mse';
-    if (captureEnabled() && kind === 'hls' && typeof muxjs !== 'undefined') return 'capture';
+    /* 这里不再看 typeof muxjs：mux.js 改成进链路② 之前按需注入
+       （112KB 没必要在每个授权页面的每个 iframe 里都解析一遍）。
+       真注入失败时 startNativeCapture 会走 fallback 降到链路③。 */
+    if (captureEnabled() && kind === 'hls') return 'capture';
     /* 只有「浏览器能自己解码的单文件流」才走 ③。<audio> 喂不进 .mpd 清单，
        DASH 页面走 ③ 只会等到 15 秒超时，所以这里明确不给链路。 */
     if (kind === 'hls' || kind === 'direct') return 'src';
@@ -867,6 +884,7 @@
    *  所以这里必须看返回值：只有 offscreen 确认收到了同一个值才算数。 */
   function pushDelay(ms, transient) {
     const want = Math.round(ms);
+    const seq = (S.pipeSeq = S.pipeSeq + 1);
     try {
       chrome.runtime.sendMessage({
         target: 'sw',
@@ -874,25 +892,33 @@
         delayMs: want,
         transient: !!transient
       }).then(function (res) {
+        /* 已经有更新的指令在飞，这一条的结果与当前状态无关，别拿它改状态 */
+        if (seq !== S.pipeSeq) return;
         const got = res && res.delayMs;
         const ok = !!res && res.ok !== false
           && (got == null || Math.abs(got - want) <= 20);
-        if (ok) { S.pipeFails = 0; S.pipeRetryAt = 0; return; }
+        if (ok) { S.pipeFails = 0; S.pipeRetryAt = 0; S.pipeErr = ''; return; }
 
         /* 没到。清掉分配记录，让下一拍重发；连续失败就退避到 2 秒一次，
            避免 offscreen 真的没了的时候每 250ms 空转。 */
+        S.pipeErr = (res && res.error) || ('无响应，got=' + String(got));
         S.pipeMs = null;
         S.pipeFails = Math.min(S.pipeFails + 1, 8);
         S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
-      }).catch(function () {
+      }).catch(function (e) {
+        if (seq !== S.pipeSeq) return;
+        S.pipeErr = String((e && e.message) || e);
         S.pipeMs = null;
         S.pipeFails = Math.min(S.pipeFails + 1, 8);
         S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
       });
     } catch (e) {
-      S.pipeMs = null;
-      S.pipeFails = Math.min(S.pipeFails + 1, 8);
-      S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
+      if (seq === S.pipeSeq) {
+        S.pipeErr = String((e && e.message) || e);
+        S.pipeMs = null;
+        S.pipeFails = Math.min(S.pipeFails + 1, 8);
+        S.pipeRetryAt = Date.now() + Math.min(2000, 150 * S.pipeFails * S.pipeFails);
+      }
     }
   }
 

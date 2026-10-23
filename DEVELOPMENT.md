@@ -855,7 +855,7 @@ globalThis.ADS_BUILD = { capture: true };   // 打包时由 package.js 改成 fa
 
 - `ads-enh-core.js` 的 `captureEnabled()` —— `pickRoute()` 里 `capture` 那条判断前面加它，面板按钮文案、链路编号也跟着切
 - `background.js` —— `importScripts('bg-capture.js')` 只在 `capture !== false` 时执行；消息路由给 `captureStart/captureStop` 加了 `typeof` 兜底，避免上架版里调用不存在的函数
-- `bg-auth.js` 的 `contentScriptFiles()` —— `mux.min.js` 按标记决定要不要列进注册表，**漏了这一步整条注册会抛错，结果是面板根本不注入**
+- `bg-auth.js` 的 `contentScriptFiles()` —— 不再列 `mux.min.js`。上架版本就没有这个文件；完整版也改成进链路② 之前按需注入（`background.js` 的 `loadMux()`），避免每个授权页面的每个 iframe 都在 `document_start` 解析 112KB
 
 `package.js` 对上架版额外做两道闸：包内任何 `.js` 出现 `chrome.debugger` 就失败；`mux.min.js` 出现在清单里也失败。所以「忘了改标记」不可能静默打出一个自称上架、实际带调试权限的包。
 
@@ -995,11 +995,13 @@ document.documentElement.dataset.adsDiag
 | 全屏前正常、全屏后只剩 `attach-ok` 不再有新事件 | **浏览器把调试会话掐了** | 见「全屏会把调试会话掐掉」，`fullscreenchange` 里已自动重连；如果还断，看 SW 里 `captureReattach` 的返回值 |
 | 页面顶部黄条一直挂着、再点启用双向报 `Another debugger is already attached` | 上一轮抓取失败时没 detach（`sourceopen` 建 SourceBuffer 抛错那条分支漏了） | 已修：`enhFail()` 在 `enhMode === 'capture'` 时统一发 `captureStop`，超时降级不再重复发 |
 
-**`mux: false` 说明注入的脚本清单漏了 `mux.min.js`**
+**`mux: false` 在还没进链路② 时是正常的**
 
-`pickRoute()` 里 `typeof muxjs === 'undefined'` 就直接跳过② —— 原生 HLS 站点会静默降级到③，面板上看到的是「重新拉一路」，看不出任何异常。
+mux.js 现在是按需注入：`pickRoute()` 不再看 `typeof muxjs`，`startNativeCapture()` 先调 `ensureMux()` → SW 的 `loadMux()`，拿到 ok 才开调试通道。所以 `adsState.mux` 在点「启用双向」之前一直是 false，不是故障。
 
-这份清单只有一处权威来源：`bg-auth.js` 的 `contentScriptFiles()`。**它同时供两条注入路径使用**（点图标后的 `chrome.scripting.executeScript`、站点授权后的 `registerContentScripts`）。以前 `background.js` 自己维护了一份 `CONTENT_SCRIPTS` 常量，漏了 `mux.min.js`，于是只有「授权过的站点」才走得了②，靠点图标注入的页面永远降级。现在两处都调同一个函数。
+如果已经进了链路② 仍显示 `mux: false`，说明这一层没有对应的 host 权限、`chrome.scripting.executeScript` 注入失败。它会走 fallback 降到③，面板上看到的是「重新拉一路」。
+
+这份清单只有一处权威来源：`bg-auth.js` 的 `contentScriptFiles()`。**它同时供两条注入路径使用**（点图标后的 `chrome.scripting.executeScript`、站点授权后的 `registerContentScripts`）。以前 `background.js` 自己维护过一份 `CONTENT_SCRIPTS` 常量，两套清单走岔过一次：同一条链路只有走某一条注入路径时才正常。现在两处都调同一个函数。
 
 
 **三种观察通道，各有不可替代的位置**

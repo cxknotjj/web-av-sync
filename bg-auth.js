@@ -12,17 +12,21 @@ const ENHANCED_IDS = ['ads-main', 'ads-content'];
 /** 内容脚本的注入顺序。build-info.js 必须第一个：后面几个都要读 ADS_BUILD。
  *  双向模式那五块也必须按依赖顺序排：它们加载时会直接解构上一个模块导出的
  *  函数，顺序错了拿到的是 undefined，而且要到用户点按钮才报错。
- *  mux.min.js 只服务链路②，上架版整个文件不进包，这里也就不能列它的名字 ——
- *  registerContentScripts 遇到不存在的文件会整条抛错，结果是面板根本不注入。 */
+ *
+ *  mux.min.js（112KB）**不在这里**。它只服务链路②，而注册是 allFrames 的 ——
+ *  放进来意味着每个授权页面的每个 iframe 都要在 document_start 解析一遍，
+ *  其中绝大多数根本不会走链路②。改成进链路② 之前由 SW 用
+ *  chrome.scripting.executeScript 按需注入（见 background.js 的 loadMux）。
+ *  上架版本来就没有这个文件，按需注入时 CAPTURE_BUILD 会直接回失败。 */
 function contentScriptFiles() {
-  const files = [
+  return [
     'build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-detect.js',
     /* core → panel → route → sync → enhance：单向依赖，没有回头箭头 */
     'ads-enh-core.js', 'ads-enh-panel.js', 'ads-enh-route.js',
-    'ads-enh-sync.js', 'ads-enhance.js'
+    'ads-enh-sync.js', 'ads-enhance.js',
+    /* 入口必须最后：它要读前面挂到 window.ADS 上的东西 */
+    'content.js'
   ];
-  if (!(globalThis.ADS_BUILD && globalThis.ADS_BUILD.capture === false)) files.push('mux.min.js');
-  return files.concat(['content.js']);
 }
 
 async function registerEnhanced(origins) {

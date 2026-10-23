@@ -451,8 +451,12 @@
     if (syncCapturePipe(currentMs())) publishState();
     /* adsState 是排查「固定延迟」的唯一现场（video 位置、PTS 偏移、缓冲）。
        只在状态跳变时发布的话，现场会停在几秒前，读出来全是过期的。
-       一秒刷一次：开销可以忽略，排查时拿到的是当前值。 */
-    if (Date.now() - lastPubAt > 1000) {
+       前台一秒刷一次：开销可以忽略，排查时拿到的是当前值。
+       标签页在后台时没人看也没人排查，降到 5 秒 —— 一次发布要选 video、
+       绕一遍缓冲区间、整包 JSON.stringify + 写 dataset，
+       多个标签页同时挂着时这笔开销是白给的。 */
+    const pubGap = document.hidden ? 5000 : 1000;
+    if (Date.now() - lastPubAt > pubGap) {
       lastPubAt = Date.now();
       publishState();
     }

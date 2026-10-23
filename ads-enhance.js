@@ -80,7 +80,10 @@
         try { S.videoEl.removeEventListener('seeking', S.seekHandler, true); } catch (e) {}
         S.seekHandler = null;
       }
-      try { S.videoEl.muted = false; } catch (e) {}
+      if (S.mutedByUs) {
+        try { S.videoEl.muted = S.prevMuted; } catch (e) {}
+        S.mutedByUs = false;
+      }
       /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
          必须放开 —— 不然后台一拆，用户的视频就永远停住了 */
       if (S.stalledByUs) {
@@ -119,7 +122,11 @@
     };
     try { S.videoEl.addEventListener('volumechange', S.guardMute, true); } catch (e) {}
 
-    try { S.videoEl.muted = true; } catch (e) {}
+    /* 记住接管前的静音状态：退出时只恢复这一份。
+       不记的话，用户本来就静音、或者中途自己点了静音，退出瞬间会突然外放。 */
+    S.prevMuted = !!S.videoEl.muted;
+    S.mutedByUs = false;
+    try { S.videoEl.muted = true; S.mutedByUs = true; } catch (e) {}
     S.enhanced = true;
 
     /* 拖进度条要在第一时间纠正音频位置、丢掉旧位置的队列。
@@ -189,7 +196,10 @@
         try { S.videoEl.removeEventListener('seeking', S.seekHandler, true); } catch (e) {}
         S.seekHandler = null;
       }
-      try { S.videoEl.muted = false; } catch (e) {}
+      if (S.mutedByUs) {
+        try { S.videoEl.muted = S.prevMuted; } catch (e) {}
+        S.mutedByUs = false;
+      }
       /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
          必须放开 —— 不然后台一拆，用户的视频就永远停住了 */
       if (S.stalledByUs) {

@@ -16,7 +16,8 @@ const OFFSCREEN_URL = 'offscreen.html';
  *  两套清单必然走岔 —— 曾经这里漏了 mux.min.js，导致「点图标」注入的页面里
  *  typeof muxjs === 'undefined'，原生 HLS 站点直接从链路② 降级到链路③，
  *  而只有走过「站点授权」那条 registerContentScripts 路径的页面才正常。
- *  函数里那个顺序也已经是对的：mux.min.js 在 content.js 之前。 */
+ *  mux.min.js 现在不在这份清单里了：链路② 真正要用时由下面的 loadMux()
+ *  按需注入，否则每个授权页面的每个 iframe 都要为它付 112KB 的解析成本。 */
 const LAST_DELAY_KEY = 'lastDelayMs';
 
 let creatingOffscreen = null;
@@ -324,6 +325,27 @@ function broadcast(msg) {
   sendToTab(currentTabId, msg);
 }
 
+/**
+ * 按需注入 mux.js（链路② 的解复用器）。
+ *
+ * 它不再随内容脚本一起注册：注册是 allFrames 的，112KB 会在每个授权页面的
+ * 每个 iframe 里都解析一遍，而真正用到它的只有原生 HLS 那一层。
+ * 页面进链路② 之前调这里，等拿到 ok 再开调试通道 —— 切片一到就要 demux。
+ */
+async function loadMux(tabId, frameId) {
+  if (tabId == null) return { ok: false, error: '拿不到标签页' };
+  if (!CAPTURE_BUILD) return NO_CAPTURE;
+  try {
+    const target = frameId == null
+      ? { tabId: tabId }
+      : { tabId: tabId, frameIds: [frameId] };
+    await chrome.scripting.executeScript({ target: target, files: ['mux.min.js'] });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: readableError(e) };
+  }
+}
+
 chrome.action.onClicked.addListener(function (tab) {
   /* 待授权：必须在这个同步执行段里直接发起请求。
      permissions.request 只认当前任务的手势，只要 await 一次
@@ -416,6 +438,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       if (typeof captureAttach !== 'function') { sendResponse(NO_CAPTURE); return false; }
       captureAttach(sender && sender.tab && sender.tab.id, sender && sender.frameId, msg.baseDir)
         .then(sendResponse);
+      return true;
+    case 'loadMux':
+      /* 链路② 的解复用器按需注入，见 loadMux 的注释 */
+      loadMux(sender && sender.tab && sender.tab.id, sender && sender.frameId).then(sendResponse);
       return true;
     case 'captureStop':
       if (typeof captureDetach !== 'function') { sendResponse(NO_CAPTURE); return false; }

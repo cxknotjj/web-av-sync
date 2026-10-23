@@ -38,17 +38,26 @@
     return out.join(' ');
   }
 
-  function paintRoute() {
+  /** @param {string} [kind] 已经判过的页面类型，省掉再扫一遍 video */
+  function paintRoute(kind) {
     if (!S.ui) return;
 
     /* enhMode 一旦有值就说明这条链路已经选定，哪怕还没落定也要按它显示。
        此时不能再走 pickRoute() 预告，否则 ② 降级到 ③ 的过程中，
        面板会一直挂着「将用 ②」，跟实际跑的对不上。 */
-    const r = ROUTES[S.enhMode] || ROUTES[pickRoute(pageKind())];
-    if (!r) { S.ui.setRoute(null); return; }
+    const k = S.enhMode ? null : (kind || pageKind());
+    const id = S.enhMode || pickRoute(k);
+    const r = ROUTES[id];
+    if (!r) {
+      S.ui.setRoute(null);
+      /* 没有链路（页面上还没 video）也要留一份 adsState：
+         排查「点了没反应」时，这是唯一能看到当前判断的现场。 */
+      publishState();
+      return;
+    }
 
     S.ui.setRoute({
-      id: routeId(S.enhMode || pickRoute(pageKind())),
+      id: routeId(id),
       /* 「将用」是给还没点的用户看的，分清预告和生效 */
       name: S.enhMode ? r.name : '将用 ' + r.name,
       /* 链路选定了但还没出声（在等数据、等降级），别让用户以为已经生效 */
@@ -140,9 +149,11 @@
 
   function publishState() {
     try {
+      /* 选一次就够：pageKind 内部原来还会再选一遍，
+         等于每秒把整页 video 扫两遍、读两遍布局。 */
       const v = pickVideo();
       document.documentElement.dataset.adsState = JSON.stringify({
-        kind: pageKind(),
+        kind: pageKind(v),
         capture: captureEnabled(),
         mux: typeof muxjs !== 'undefined',
         hookInstalled: S.hookInstalled,
@@ -166,6 +177,8 @@
         /* 这一次写给 DelayNode 的值。排查「拖了没反应」时，先看它有没有跟着动：
            null = 还没分配过，负数 = 已归零，正数 = 这个值正在 DelayNode 上 */
         pipeMs: S.pipeMs,
+        /* 下发失败的原因（空串 = 正常）。pipeMs 是 null 时先看这里 */
+        pipeErr: S.pipeErr,
         /* 「拖回去却没同步」的现场：归零时音频要往后退，退到哪、有没有数据，
            全看这三项。bufferedHas 为假说明目标点已经在 MSE 缓冲之外 ——
            这是 trimBuffer 把历史删过头了，不是 DelayNode 的事。 */
@@ -196,8 +209,10 @@
 
     S.ui.setTip(S.enhanced ? '负值让声音提前 · 滚轮可调' : '只延后声音 · 滚轮可调');
     S.ui.setModeTag(S.enhanced ? '双向' : '延迟', S.enhanced);
-    paintRoute();
-    publishState();
+    /* 判一次就够了：paintRoute 和下面的按钮文案用的是同一个结果。
+       paintRoute 里已经发布过一次状态，这里不再重复 publishState。 */
+    const kind = pageKind();
+    paintRoute(kind);
 
     if (S.enhanced) {
       S.ui.setModeBtn('', '', true);
@@ -209,10 +224,9 @@
       return;
     }
 
-    const kind = pageKind();
-
     if (kind === 'hls') {
-      S.ui.setModeBtn('启用双向', (captureEnabled() && typeof muxjs !== 'undefined')
+      /* mux.js 现在按需注入，面板文案只看这条链路有没有被裁掉即可 */
+      S.ui.setModeBtn('启用双向', captureEnabled()
         ? '原生 HLS：先用调试协议取回播放器已下载的切片，不额外耗流量（浏览器顶部会提示正在调试）；取不到时自动改为重新拉一路'
         : '原生 HLS：用同一条流再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量', false);
       return;
@@ -253,22 +267,48 @@
     }
   }
 
+  /* 没等到 video 的框架（典型是空 iframe）不能一直 400ms 轮询下去：
+     授权站点的每一层都会跑这份脚本，一个空框架挂一小时就是永久的后台开销。
+     改成退避 + 期限：间隔从 400ms 逐步放到 3s，30 秒还没有 video 就放弃；
+     有 video 但一直没地址的（unknown）最多等 60 秒。 */
+  let watchStart = 0;
+  let watchDelay = 400;
+
   function startModeWatch() {
     if (S.modeTimer) return;
-    S.modeTimer = setInterval(function () {
+    watchStart = Date.now();
+    watchDelay = 400;
+    scheduleWatch();
+  }
+
+  function scheduleWatch() {
+    S.modeTimer = setTimeout(function () {
+      S.modeTimer = null;
+      if (!S.ui) return;
+
       /* 有 video 了才显形：跨域 iframe 场景下，父框架会一直等不到 video，
          面板就保持隐藏；真正有播放器的那个 frame 会在这里显形。 */
-      if (S.ui && S.ui.host.style.display === 'none' && pickVideo()) S.ui.reveal();
+      if (S.ui.host.style.display === 'none' && pickVideo()) S.ui.reveal();
 
       /* 先重绘再判断要不要停：地址刚出现的那一次，正是需要刷新文案的时候 */
       paintModeUI();
+
       const k = pageKind();
-      if (!S.hookInstalled || S.hookReady || S.enhanced || (k !== 'unknown' && k !== 'none')) stopModeWatch();
-    }, 400);
+      const age = Date.now() - watchStart;
+      if (!S.hookInstalled || S.hookReady || S.enhanced ||
+          (k !== 'unknown' && k !== 'none') ||
+          (k === 'none' && age > 30000) || age > 60000) {
+        stopModeWatch();
+        return;
+      }
+
+      watchDelay = Math.min(3000, Math.round(watchDelay * 1.25));
+      scheduleWatch();
+    }, watchDelay);
   }
 
   function stopModeWatch() {
-    if (S.modeTimer) { clearInterval(S.modeTimer); S.modeTimer = null; }
+    if (S.modeTimer) { clearTimeout(S.modeTimer); S.modeTimer = null; }
   }
 
   function updateModeUI() {

@@ -25,17 +25,24 @@
 
     let best = null;
     let bestArea = 0;
-    document.querySelectorAll('video').forEach(function (v) {
+    const list = document.querySelectorAll('video');
+    /* 只有一个 video 是绝大多数页面。这种情况按面积挑纯属浪费：
+       clientWidth/clientHeight 读的是布局值，只要前面改过 DOM 就会强制
+       样式重算 + 重排（面板每 250ms 调一次，累积起来是实打实的掉帧）。 */
+    if (list.length === 1) return list[0];
+    list.forEach(function (v) {
       const area = (v.clientWidth || 0) * (v.clientHeight || 0);
       if (area > bestArea) { bestArea = area; best = v; }
     });
-    return best || document.querySelector('video');
+    return best || list[0] || null;
   }
 
   /** 判断这一页的播放方式。返回值同时决定双向模式走哪条链路：
-   *  mse → ①；hls → ②③；dash / direct → ③；stream / unknown / none → 不支持。 */
-  function pageKind() {
-    const v = pickVideo();
+   *  mse → ①；hls → ②③；dash / direct → ③；stream / unknown / none → 不支持。
+   *  可选传入已经选好的 video：调用方通常刚调过 pickVideo，再选一次等于
+   *  把整页 video 扫两遍、布局读两遍（publishState 就是这种调用方）。 */
+  function pageKind(video) {
+    const v = video || pickVideo();
     if (!v) return 'none';
 
     /* 少数播放器把 MediaSource 挂到 srcObject，地址栏里看不到 blob: */
