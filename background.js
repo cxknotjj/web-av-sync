@@ -55,11 +55,28 @@ function clampDelay(v) {
   return Math.min(10000, Math.max(0, Math.round(n)));
 }
 
-async function saveDelay(ms) {
-  lastDelayMs = clampDelay(ms);
+/* 拖动滑块时 setDelay 每 50ms 来一条（content 侧的节流），每次都落盘就是
+   每秒 20 次 storage 写入。存下来的只是「下次接管沿用哪个值」，
+   没有任何理由实时写 —— 拖动期间 500ms 最多写一次，停止时补写最终值。 */
+const SAVE_DELAY_GAP_MS = 500;
+let saveTimer = null;
+let savedAt = 0;
+
+function flushSaveDelay() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  savedAt = Date.now();
   try {
-    await chrome.storage.local.set({ [LAST_DELAY_KEY]: lastDelayMs });
+    chrome.storage.local.set({ [LAST_DELAY_KEY]: lastDelayMs }).catch(function () {});
   } catch (e) {}
+}
+
+function saveDelay(ms, immediate) {
+  lastDelayMs = clampDelay(ms);
+  if (immediate) { flushSaveDelay(); return; }
+  const wait = SAVE_DELAY_GAP_MS - (Date.now() - savedAt);
+  if (wait <= 0) { flushSaveDelay(); return; }
+  /* 已经有一个待写的定时器就让它继续 —— 它触发时读的是最新的 lastDelayMs */
+  if (!saveTimer) saveTimer = setTimeout(flushSaveDelay, wait);
 }
 
 
@@ -171,6 +188,9 @@ async function stop() {
   await stateReady;
   const tabId = currentTabId;
   await stopAudio();
+  /* 节流中的最后一次拖动可能还没落盘，停止时补写 —— 否则下次接管
+     还会用上一个值，用户会以为「调好的延迟没记住」。 */
+  flushSaveDelay();
   await setTab(null);
 
   if (tabId != null) {

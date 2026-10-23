@@ -245,6 +245,14 @@
     }
     if (m.type === 'track') {
       if (m.mime) S.audioMime = m.mime;
+      /* 新的 SourceBuffer 一定带新的 init segment（moov）。种子缓冲里那条
+         init 属于上一路流 —— 换集、切清晰度、播放器重建 MediaSource 都会
+         走到这里，而 core 的修剪规则永远保留 chunks[0]，旧 init 只会被
+         新片段围在中间、永远删不掉。
+         不清的话，下次启用双向会先 append 一个不匹配的 moov：
+         轻则「音频片段连续对不上」，重则整段没声音。 */
+      S.chunks = [];
+      S.chunkBytes = 0;
       S.hookInstalled = true;
       S.hookReady = true;
       updateModeUI();

@@ -66,6 +66,10 @@ function makeEnv(opts) {
     removeChild() {}
   };
 
+  /* 记录 window 上的监听器：ads-enhance 的 onPageMessage 挂在 window 上，
+     要验证「新 track 到达时清种子」必须能真的把消息递进去。 */
+  const winListeners = {};
+
   const sandbox = {
     console,
     setTimeout: opts.setTimeout || setTimeout,
@@ -76,8 +80,13 @@ function makeEnv(opts) {
     URL, atob, isFinite,
     location: { origin: 'https://example.com' },
     chrome: { runtime: { sendMessage: () => Promise.resolve({ ok: true }) } },
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, fn) { (winListeners[type] = winListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const a = winListeners[type];
+      if (!a) return;
+      const i = a.indexOf(fn);
+      if (i >= 0) a.splice(i, 1);
+    },
     postMessage() {},
     MediaSource: function MediaSource() {},
     document: {
@@ -93,6 +102,10 @@ function makeEnv(opts) {
   const ctx = vm.createContext(sandbox);
   vm.runInContext('this.window = this;', ctx);
   sandbox.__calls = calls;
+  /** 模拟一条 window.postMessage 消息（MAIN world → content） */
+  sandbox.__fire = function (type, ev) {
+    (winListeners[type] || []).slice().forEach(function (fn) { fn(ev); });
+  };
   return sandbox;
 }
 
@@ -390,6 +403,8 @@ console.log('\n[14] 退出时恢复接管前的静音状态');
 console.log('\n[15] content.js 重复注入：监听器能被摘干净');
 {
   const winAdd = [], winRemove = [], docAdd = [], docRemove = [];
+  const uiCalls = { meter: 0 };
+  let msgListener = null;
   const sandbox = {
     console,
     setInterval: () => 1,
@@ -405,14 +420,19 @@ console.log('\n[15] content.js 重复注入：监听器能被摘干净');
     },
     chrome: {
       runtime: {
-        onMessage: { addListener: () => {}, removeListener: () => {} },
+        onMessage: {
+          addListener: (fn) => { msgListener = fn; },
+          removeListener: () => {}
+        },
         sendMessage: () => Promise.resolve({ active: false, granted: false })
       }
     },
     ADS: {
       ui: {
         host: { style: { display: 'none' } },
-        setValue() {}, reveal() {}, hide() {}, destroy() {}, showToast() {}
+        setValue() {}, reveal() {}, hide() {}, destroy() {}, showToast() {},
+        paintMeter() { uiCalls.meter++; },
+        isVisible() { return this.host.style.display !== 'none'; }
       },
       enh: {
         init() {}, pickVideo: () => null, isEnhanced: () => false, exit() {},
@@ -432,6 +452,14 @@ console.log('\n[15] content.js 重复注入：监听器能被摘干净');
 
   check('window 上装了 message 监听', winAdd.indexOf('message') >= 0, winAdd.join(','));
   check('document 上装了 fullscreenchange 监听', docAdd.indexOf('fullscreenchange') >= 0, docAdd.join(','));
+
+  /* meter 是广播消息（SW 不带 frameId，每个 frame 都会收到）。
+     没露面板的层不该跟着画 —— 授权站点的播放页常有五六个 iframe。 */
+  msgListener({ target: 'content', type: 'meter', rms: 0.5 });
+  check('面板隐藏时不画电平', uiCalls.meter === 0, uiCalls.meter);
+  sandbox.ADS.ui.host.style.display = '';
+  msgListener({ target: 'content', type: 'meter', rms: 0.5 });
+  check('面板显示时照常画电平', uiCalls.meter === 1, uiCalls.meter);
 
   sandbox.__adsContentTeardown();
   check('detach 摘掉 message', winRemove.indexOf('message') >= 0, winRemove.join(','));
@@ -477,6 +505,32 @@ console.log('\n[16] 空框架的轮询会自己停（退避 + 期限）');
   advance(35000);
   check('30 秒等不到 video → 自己停', env2.ADS.E.S.modeTimer === null);
   check('退避生效（回调次数远小于 400ms 固定间隔）', timers.length < 30, timers.length);
+}
+
+console.log('\n[17] 换源（新的 SourceBuffer）后清掉旧种子');
+{
+  /* 换集 / 切清晰度时播放器会新建 MediaSource，addSourceBuffer 被再调一次，
+     inject-main 于是发一条新的 track。core 的修剪规则永远保留 chunks[0]，
+     旧 init 只能在这里清掉 —— 否则下次启用双向会先 append 一个不匹配的
+     moov，轻则「音频片段连续对不上」，重则整段没声音。 */
+  const S = env.ADS.E.S;
+  const core = env.ADS.E.core;
+  const AB = (n) => vm.runInContext('new ArrayBuffer(' + n + ')', env);
+
+  S.enhanced = false; S.enhMode = '';
+  S.chunks = []; S.chunkBytes = 0; S.appendQueue = [];
+  core.pushChunk(AB(4096));     /* 上一路流的 init（moov） */
+  core.pushChunk(AB(2048));     /* 上一路流的媒体片 */
+  check('先攒下上一路流的种子',
+    S.chunks.length === 2 && S.chunks[0].byteLength === 4096, S.chunks.length);
+
+  env.__fire('message', {
+    data: { __ads: true, type: 'track', mime: 'audio/mp4; codecs="mp4a.40.2"' }
+  });
+  check('track 到达 → 旧种子清空',
+    S.chunks.length === 0 && S.chunkBytes === 0, S.chunks.length + ' / ' + S.chunkBytes);
+  check('新 mime 已记下', /mp4a/.test(S.audioMime), S.audioMime);
+  check('hook 状态没有被打乱', S.hookInstalled === true && S.hookReady === true);
 }
 
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');

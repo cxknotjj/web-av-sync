@@ -158,6 +158,10 @@
     }
 
     if (msg.type === 'meter') {
+      /* 这条是广播：SW 的 sendToTab 不带 frameId，同一标签页的每一层都会收到，
+         每秒 4 次。没有面板的框架（授权站点的播放页常有五六个 iframe）
+         画了也没人看，纯属白给 —— 只让露着面板的那一层画。 */
+      if (U.isVisible && !U.isVisible()) return;
       U.paintMeter(msg.rms);
       return;
     }

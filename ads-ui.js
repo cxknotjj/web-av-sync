@@ -367,6 +367,13 @@
     host.style.display = 'none';
   }
 
+  /** 面板此刻是否真的露在外面。
+   *  meter 是广播消息（SW 不带 frameId，同一标签页的每一层都会收到），
+   *  没有面板的 iframe 画了也没人看 —— 见 content.js 的 meter 分支。 */
+  function isVisible() {
+    return host.style.display !== 'none';
+  }
+
   function destroy() {
     document.removeEventListener('fullscreenchange', syncFullscreen, true);
     /* 这两个监听器挂在 document 上，不摘掉的话「停止 → 再接管」每来一次
@@ -389,6 +396,7 @@
 
     reveal: reveal,
     hide: hide,
+    isVisible: isVisible,
     destroy: destroy,
 
     setValue: setValue,
