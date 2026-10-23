@@ -150,6 +150,12 @@ The only difference is Route ②. It needs the `debugger` permission, whose inst
 
 **Don't install both builds in the same browser** — different extension IDs; they'll be treated as two separate extensions.
 
+### Interface language
+
+The panel, the toasts, the extension name and its description all ship in Chinese and English and follow the **browser's UI language**: a Chinese browser gets Chinese, everything else gets English. There is no separate switch — change the browser's UI language and restart it.
+
+A missing translation falls back to the Chinese original rather than showing a raw `key`. To add a third language, see the "UI strings" section of [`DEVELOPMENT.md`](DEVELOPMENT.md).
+
 ***
 
 ## FAQ
@@ -229,6 +235,8 @@ Switching tabs stops the previous takeover. In fullscreen the panel follows into
 - Fixed leaving bidirectional mode overwriting your own mute state: if the player was already muted, or you muted it yourself mid-session, exiting no longer blasts audio
 - Repeated stop / take-over cycles no longer accumulate event listeners, so long sessions don't degrade
 - The panel's diagnostic fields now include the reason a delay push failed, making "I clicked and nothing happened" much easier to pin down
+- Fixed enabling bidirectional after the video has already been playing for a while: the sound got stuck at the start and the mode gave up after ~15 s (MSE players)
+- The interface is available in Chinese and English and follows the browser's UI language; in English the extension name, description and every panel string are translated
 
 ### 1.0.1
 

@@ -105,7 +105,59 @@ if (fnStart < 0) {
   else ok('注入清单 ' + listed.length + ' 个文件都在');
 }
 
-/* ---------------- 5. 上架版不该带 mux.min.js ---------------- */
+/* ---------------- 5. 语言包 ---------------- */
+
+/* manifest 里一旦写了 default_locale，Chrome 要求 _locales/<locale>/messages.json
+   必须存在 —— 缺了整个扩展都加载不起来（不是面板不出现，是直接装不上）。
+   而打包清单是手写的，漏一个文件本地看不出来，只有装的时候才炸。 */
+{
+  const mf = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  const msgKeys = (mf.name + ' ' + mf.description + ' '
+    + (mf.action && mf.action.default_title ? mf.action.default_title : ''))
+    .match(/__MSG_([A-Za-z0-9_]+)__/g) || [];
+  const wanted = msgKeys.map((k) => k.slice(6, -2));
+
+  if (!mf.default_locale) {
+    bad('manifest 缺 default_locale（界面文案要走 _locales）');
+  } else {
+    const dir = path.join(ROOT, '_locales');
+    const locales = fs.existsSync(dir)
+      ? fs.readdirSync(dir).filter((d) => fs.statSync(path.join(dir, d)).isDirectory())
+      : [];
+
+    if (!locales.length) bad('没有 _locales 目录');
+    if (mf.default_locale && locales.indexOf(mf.default_locale) < 0) {
+      bad('default_locale 指向的目录不存在：' + mf.default_locale);
+    }
+
+    for (const loc of locales) {
+      const f = path.join(dir, loc, 'messages.json');
+      if (!fs.existsSync(f)) { bad(loc + ' 缺 messages.json'); continue; }
+      let msgs = null;
+      try { msgs = JSON.parse(fs.readFileSync(f, 'utf8')); }
+      catch (e) { bad(loc + '/messages.json 不是合法 JSON：' + e.message); continue; }
+      const missing = wanted.filter((k) => !msgs[k]);
+      if (missing.length) bad(loc + ' 缺 manifest 用到的键：' + missing.join(', '));
+    }
+
+    /* 商店对 name / description 有硬上限，而 __MSG__ 让长度在源码里看不出来 */
+    for (const loc of locales) {
+      const f = path.join(dir, loc, 'messages.json');
+      if (!fs.existsSync(f)) continue;
+      let msgs = {};
+      try { msgs = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { continue; }
+      const nm = msgs.extName && msgs.extName.message;
+      const ds = msgs.extDesc && msgs.extDesc.message;
+      if (nm && nm.length > 45) bad(loc + ' 的扩展名超过 45 字符（' + nm.length + '）');
+      if (ds && ds.length > 132) bad(loc + ' 的简介超过 132 字符（' + ds.length + '）');
+    }
+
+    const before = failures;
+    if (failures === before) ok('语言包完整：' + locales.join(' / '));
+  }
+}
+
+/* ---------------- 6. 上架版不该带 mux.min.js ---------------- */
 
 const manifestAll = fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8');
 if (manifestAll.indexOf('mux.min.js') >= 0) {

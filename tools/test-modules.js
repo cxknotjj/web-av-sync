@@ -533,5 +533,149 @@ console.log('\n[17] 换源（新的 SourceBuffer）后清掉旧种子');
   check('hook 状态没有被打乱', S.hookInstalled === true && S.hookReady === true);
 }
 
+console.log('\n[18] 链路① 落后时贴到缓冲（画面 14.6s、声音还在 0s）');
+{
+  const S = env.ADS.E.S;
+  const core = env.ADS.E.core;
+
+  /* 假的 <audio>：只要 buffered（TimeRanges 形状）和 currentTime */
+  const fake = function (ranges, ct) {
+    return {
+      currentTime: ct,
+      buffered: {
+        length: ranges.length,
+        start: function (i) { return ranges[i][0]; },
+        end: function (i) { return ranges[i][1]; }
+      }
+    };
+  };
+
+  /* 主场景：种子只有 0~14.6，画面已经到 14.67 —— 老代码在这里什么都不做，
+     声音会一直播 0 秒那段。新逻辑要贴到缓冲末尾（end-0.2）。 */
+  S.enhAudio = fake([[0, 14.6]], 0);
+  check('目标点在缓冲外→贴到末尾',
+    core.catchUpToBuffered(14.67) === true, S.enhAudio.currentTime);
+  check('贴的位置不超过目标、且真的动了',
+    Math.abs(S.enhAudio.currentTime - 14.4) < 0.01, S.enhAudio.currentTime);
+
+  /* jyctv 的原始现场：缓冲 14.05~20.18、音频停在 17.03、目标是 20.07。
+     目标点离缓冲末尾只有 0.11 秒，bufferedHas 要求「末尾留 0.15 秒安全边距」，
+     于是判成「没数据」；老代码在这一格什么也不做，声音就一直停在 17 秒。 */
+  S.enhAudio = fake([[14.05, 20.18]], 17.03);
+  check('贴着缓冲末尾也能摆过去（jyctv 原始现场）',
+    core.catchUpToBuffered(20.07) === true
+      && Math.abs(S.enhAudio.currentTime - 20.07) < 0.01,
+    S.enhAudio.currentTime);
+
+  /* 目标点落在空洞里（10~20 没数据）：不跳 —— 跳到 20 等于把 5 秒后的
+     声音提前放出来。返回 false，交给静音逻辑等数据填洞。 */
+  S.enhAudio = fake([[0, 10], [20, 30]], 5);
+  check('目标点在空洞里不乱跳', core.catchUpToBuffered(15) === false,
+    S.enhAudio.currentTime);
+
+  /* 同一段缓冲，目标点落在后一段里：照常摆过去 */
+  S.enhAudio = fake([[0, 10], [20, 30]], 5);
+  check('目标点在后一段里→直接摆过去',
+    core.catchUpToBuffered(25) === true && Math.abs(S.enhAudio.currentTime - 25) < 0.01,
+    S.enhAudio.currentTime);
+
+  /* 目标点在缓冲里：直接摆过去，绝不越过目标点 */
+  S.enhAudio = fake([[0, 60]], 0);
+  core.catchUpToBuffered(30);
+  check('不越过目标点', Math.abs(S.enhAudio.currentTime - 30) < 0.01, S.enhAudio.currentTime);
+
+  /* 已经在目标附近：不动（避免稳态下每拍都设 currentTime） */
+  S.enhAudio = fake([[0, 60]], 29.9);
+  check('已经贴住就不动', core.catchUpToBuffered(30) === false, S.enhAudio.currentTime);
+
+  /* 一段缓冲都没有：不动，交给静音逻辑 */
+  S.enhAudio = fake([], 0);
+  check('没有缓冲时不乱设位置', core.catchUpToBuffered(30) === false, S.enhAudio.currentTime);
+
+  S.enhAudio = null;
+}
+
+console.log('\n[19] 界面文案：英文语言包能覆盖代码里用到的每个 key');
+{
+  const en = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales/en/messages.json'), 'utf8'));
+  const zhDir = path.join(ROOT, '_locales/zh_CN/messages.json');
+  const zh = JSON.parse(fs.readFileSync(zhDir, 'utf8'));
+
+  /* manifest 的 __MSG__ 必须在默认语言里有对应条目，否则装的时候就报错 */
+  const mf = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  const placeholders = ((mf.name || '') + ' ' + (mf.description || '') + ' '
+    + ((mf.action && mf.action.default_title) || '')).match(/__MSG_([A-Za-z0-9_]+)__/g) || [];
+  const missingManifest = placeholders.map((k) => k.slice(6, -2)).filter((k) => !zh[k]);
+  check('manifest 的 __MSG__ 在默认语言里都有',
+    placeholders.length > 0 && missingManifest.length === 0, missingManifest.join(','));
+
+  /* 代码里 T('key', '中文') 的 key 必须都在 en 包里 */
+  const files = ['ads-template.js', 'ads-enh-core.js', 'ads-enh-panel.js', 'ads-enh-route.js',
+    'ads-enh-sync.js', 'ads-enhance.js', 'content.js'];
+  const used = new Set();
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const re = /T\('([A-Za-z0-9_]+)'/g;
+    let m;
+    while ((m = re.exec(src))) used.add(m[1]);
+  }
+  const missing = [...used].filter((k) => !en[k] || !en[k].message);
+  check('代码用到的 ' + used.size + ' 个 key 都有英文', missing.length === 0, missing.join(','));
+  const cjk = [...used].filter((k) => en[k] && /[\u4e00-\u9fa5]/.test(en[k].message));
+  check('英文包里没有残留中文', cjk.length === 0, cjk.join(','));
+
+  /* 真跑一遍模块：getUILanguage 返回英文时，t() 必须吐英文；
+     查不到的 key 退回中文原句，绝不能让界面露出 key 名 */
+  const box = {
+    console,
+    navigator: { language: 'en-US' },
+    chrome: {
+      i18n: {
+        getUILanguage: () => 'en-US',
+        getMessage: (k) => (en[k] && en[k].message) || ''
+      }
+    }
+  };
+  box.window = box;
+  vm.createContext(box);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'ads-i18n.js'), 'utf8'), box, { filename: 'ads-i18n.js' });
+
+  const i18n = box.ADS.i18n;
+  check('英文环境下 lang=en', i18n.lang === 'en', i18n.lang);
+  check('t() 取到英文', i18n.t('uiStop', '停止') === 'Stop', i18n.t('uiStop', '停止'));
+  check('缺翻译时退回中文，不露 key',
+    i18n.t('__not_a_key__', '中文兜底') === '中文兜底', i18n.t('__not_a_key__', '中文兜底'));
+
+  /* 中文环境不查语言包，直接用原文（省一次查表，也保证中文永远最新） */
+  const box2 = {
+    console,
+    navigator: { language: 'zh-CN' },
+    chrome: { i18n: { getUILanguage: () => 'zh-CN', getMessage: () => 'WRONG' } }
+  };
+  box2.window = box2;
+  vm.createContext(box2);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'ads-i18n.js'), 'utf8'), box2, { filename: 'ads-i18n.js' });
+  check('中文环境直接用原文', box2.ADS.i18n.t('uiStop', '停止') === '停止', box2.ADS.i18n.lang);
+}
+
+console.log('\n[20] 模板重复注入：顶层声明不会互相打架');
+{
+  const box = { console };
+  box.window = box;
+  vm.createContext(box);
+  const src = fs.readFileSync(path.join(ROOT, 'ads-template.js'), 'utf8');
+  let err = null;
+  try {
+    vm.runInContext(src, box, { filename: 'ads-template.js' });
+    vm.runInContext(src, box, { filename: 'ads-template.js' });
+  } catch (e) { err = e; }
+  /* 注入是按文件执行的、共享全局作用域：顶层写 const T 的话，第二次注入
+     会抛 Identifier has already been declared，整份模板不执行 ——
+     面板失去全部样式与结构，页面上却看不到任何异常。 */
+  check('连注入两次不抛错', !err, err && err.message);
+  check('模板内容仍然在', !!(box.ADS_STYLE && box.ADS_STYLE.panel),
+    box.ADS_STYLE ? Object.keys(box.ADS_STYLE).join(',') : 'undefined');
+}
+
 console.log(failures === 0 ? '\n全部通过' : '\n失败 ' + failures + ' 项');
 process.exit(failures === 0 ? 0 : 1);

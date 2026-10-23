@@ -16,6 +16,8 @@
 (function () {
   window.ADS = window.ADS || {};
   const E = window.ADS.E;
+  /* 界面文案：中文写在第二个参数里，英文从 _locales/en 取（见 ads-i18n.js） */
+  const T = window.ADS.i18n ? window.ADS.i18n.t : function (key, zh) { return zh; };
 
   /* 前面几块必须都就位，缺一个就别硬跑 —— 半套模块只会让状态更难查 */
   if (!E || !E.core || !E.panel || !E.route || !E.sync) return;
@@ -192,13 +194,13 @@
 
     /* DASH 清单：别走到下面的授权流程 —— 授权 + 刷新之后再点还是不支持 */
     if (k === 'dash') {
-      S.ui.showToast('DASH（.mpd）暂不支持双向模式，延迟模式仍然可用。');
+      S.ui.showToast(T('failDash', 'DASH（.mpd）暂不支持双向模式，延迟模式仍然可用。'));
       return;
     }
 
     if (S.hookInstalled) {
       S.ui.showToast(pageIsMSE()
-        ? '还没截到音频轨，先让视频播放几秒再点。'
+        ? T('hintWaitTrack', '还没截到音频轨，先让视频播放几秒再点。')
         : whyNoEnhanced());
       return;
     }
@@ -212,10 +214,12 @@
           type: 'registerOnly',
           origin: location.origin
         });
-        S.ui.showToast((res && res.ok) ? '已重新注册，正在刷新页面…' : ((res && res.error) || '注册失败'),
+        S.ui.showToast((res && res.ok)
+          ? T('toastReRegistered', '已重新注册，正在刷新页面…')
+          : ((res && res.error) || T('errRegFailed', '注册失败')),
           (res && res.ok) ? 'ok' : undefined);
       } catch (e) {
-        S.ui.showToast('注册请求失败：' + ((e && e.message) || e));
+        S.ui.showToast(T('errRegRequest', '注册请求失败：') + ((e && e.message) || e));
       }
       return;
     }
@@ -227,10 +231,10 @@
         type: 'requestEnhance',
         origin: location.origin
       });
-      if (res && res.ok) S.ui.showToast('已授权，正在刷新页面…', 'ok');
-      else S.ui.showToast((res && res.error) || '授权失败');
+      if (res && res.ok) S.ui.showToast(T('toastAuthorized', '已授权，正在刷新页面…'), 'ok');
+      else S.ui.showToast((res && res.error) || T('errAuthFailed', '授权失败'));
     } catch (e) {
-      S.ui.showToast('授权请求失败：' + ((e && e.message) || e));
+      S.ui.showToast(T('errAuthRequest', '授权请求失败：') + ((e && e.message) || e));
     }
   }
 

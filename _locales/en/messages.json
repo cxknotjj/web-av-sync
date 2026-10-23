@@ -1,0 +1,302 @@
+{
+  "extName": {
+    "message": "Audio Delay Sync",
+    "description": "Extension name"
+  },
+  "extDesc": {
+    "message": "Delay the current tab's audio in real time to fix lip-sync drift. The page player, seek bar and quality switching stay untouched.",
+    "description": "Extension description"
+  },
+  "actionTitle": {
+    "message": "Audio Delay Sync · Click to take over this tab",
+    "description": "Toolbar button tooltip"
+  },
+  "routeMseName": {
+    "message": "Reuse page segments"
+  },
+  "routeMseTag": {
+    "message": "No extra data"
+  },
+  "routeMseDesc": {
+    "message": "The player already decodes through MSE, so its audio segments pass through appendBuffer — reuse them as-is, no extra download."
+  },
+  "routeCapName": {
+    "message": "Capture downloaded segments"
+  },
+  "routeCapTag": {
+    "message": "No extra data"
+  },
+  "routeCapDesc": {
+    "message": "Native HLS: pull back the ts segments the player already fetched over the debugging protocol — no extra download. The trade-off is the \"being debugged\" banner at the top of the browser, and it fails if you have DevTools open."
+  },
+  "routeSrcName": {
+    "message": "Fetch a second stream"
+  },
+  "routeSrcTag": {
+    "message": "~2× data"
+  },
+  "routeSrcDesc": {
+    "message": "Decode the same stream once more and keep only the sound. No permission, no refresh — but roughly double the download."
+  },
+  "noticeSrcSwitch": {
+    "message": "Video source changed, re-attaching audio…"
+  },
+  "noticeAd": {
+    "message": "Ad break detected — sound pauses and resumes automatically afterwards"
+  },
+  "whyNoVideoEl": {
+    "message": "No video element found on this page."
+  },
+  "whyNotLoaded": {
+    "message": "The video hasn't started loading. Press play, let it run a few seconds, then try again."
+  },
+  "whyMediaStream": {
+    "message": "This page plays a live MediaStream, so its audio never goes through MSE. Bidirectional mode is unavailable; delay mode still works."
+  },
+  "whyDash": {
+    "message": "This page uses a DASH (.mpd) manifest, so there is no audio channel to reuse. Bidirectional mode is unavailable; delay mode still works."
+  },
+  "whyUnsupported": {
+    "message": "Bidirectional mode doesn't cover this kind of playback. Refresh the page and try again; if it persists, please report it."
+  },
+  "toastGap": {
+    "message": "Audio segments keep landing out of order (gaps in the page's audio track) — sound may drop out occasionally"
+  },
+  "failNoAudioData": {
+    "message": "Couldn't capture usable audio, so bidirectional mode was dropped and the video's own sound is unchanged."
+  },
+  "failAudioInit": {
+    "message": "Audio track init failed: "
+  },
+  "failCaptureAttach": {
+    "message": "Segment capture failed (debugger busy, or the page made no new segment requests) — degraded automatically"
+  },
+  "failCaptureFallback": {
+    "message": "No segments captured — switched to fetching a second stream (~2× data)"
+  },
+  "errMuxLoad": {
+    "message": "mux.js injection failed"
+  },
+  "errMuxUse": {
+    "message": "mux.js still unavailable after injection"
+  },
+  "failSrcTimeout": {
+    "message": "Audio stream timed out, so bidirectional mode was dropped and the video's own sound is unchanged."
+  },
+  "whyNoVideo": {
+    "message": "No video element found on this page"
+  },
+  "whyDirectMedia": {
+    "message": "The page loads media directly (.mp4, not .m3u8), so there are no segments to capture — the only option is a second stream"
+  },
+  "whyNoSegData": {
+    "message": "There is an m3u8 but no segment data could be read"
+  },
+  "hintWaitSeg": {
+    "message": "Audio segments haven't accumulated yet — let the video play a few seconds and try again."
+  },
+  "hintWaitTrack": {
+    "message": "No audio track captured yet — let the video play a few seconds, then click."
+  },
+  "toastResumed": {
+    "message": "Sound restored"
+  },
+  "toastStall": {
+    "message": "Buffer can't cover the advance — video paused while it downloads…"
+  },
+  "failResume": {
+    "message": "The video wouldn't resume, so bidirectional mode was dropped"
+  },
+  "failNoDataAtPos": {
+    "message": "Audio for this position hasn't downloaded — left bidirectional mode, sound is back to the page's own."
+  },
+  "toastZeroAdvance": {
+    "message": "Buffer never caught up — the advance was reset to zero and only the delay is left."
+  },
+  "toastLowerAdv": {
+    "message": "Buffer behind — safe advance lowered to "
+  },
+  "unitSecondsDot": {
+    "message": "s."
+  },
+  "unitSeconds": {
+    "message": "s"
+  },
+  "failDegradeSrc": {
+    "message": "Audio kept waiting for data — switched to fetching a second stream (~2× data)"
+  },
+  "toastDegraded": {
+    "message": "Not enough segments captured — degraded automatically"
+  },
+  "failMseSilent": {
+    "message": "Audio couldn't keep up with the picture — left bidirectional mode, sound is back to the page's own."
+  },
+  "failDash": {
+    "message": "DASH (.mpd) isn't supported in bidirectional mode yet; delay mode still works."
+  },
+  "toastReRegistered": {
+    "message": "Re-registered, reloading the page…"
+  },
+  "errRegFailed": {
+    "message": "registration failed"
+  },
+  "errRegRequest": {
+    "message": "Registration request failed: "
+  },
+  "toastAuthorized": {
+    "message": "Authorised, reloading the page…"
+  },
+  "errAuthFailed": {
+    "message": "authorisation failed"
+  },
+  "errAuthRequest": {
+    "message": "Authorisation request failed: "
+  },
+  "pmUsePrefix": {
+    "message": "Will use "
+  },
+  "pmConnecting": {
+    "message": "Connecting…"
+  },
+  "pmReason": {
+    "message": " ｜ Reason: "
+  },
+  "pmStallDown": {
+    "message": "Buffering · downloading…"
+  },
+  "pmStallReady": {
+    "message": "Buffering · data arrived, resuming"
+  },
+  "pmStallLeft": {
+    "message": "Buffering · need "
+  },
+  "pmAd": {
+    "message": " · Ad break, sound resumes after"
+  },
+  "pmSwap": {
+    "message": " · Source switching, re-attaching audio…"
+  },
+  "pmReload": {
+    "message": " · Audio reloading, picture continues"
+  },
+  "pmAligning": {
+    "message": " · Aligning…"
+  },
+  "pmAlignAt": {
+    "message": " · Aligning, "
+  },
+  "pmAhead": {
+    "message": "audio ahead "
+  },
+  "pmBehind": {
+    "message": "audio behind "
+  },
+  "pmAdvance": {
+    "message": " · Safe advance "
+  },
+  "tipEnhanced": {
+    "message": "Negative values pull sound earlier · scroll wheel to adjust"
+  },
+  "tipDelayOnly": {
+    "message": "Delay only · scroll wheel to adjust"
+  },
+  "tagBi": {
+    "message": "Both ways"
+  },
+  "tagDelay": {
+    "message": "Delay"
+  },
+  "btnEnable": {
+    "message": "Enable bidirectional"
+  },
+  "tipEnableMse": {
+    "message": "Reuse the audio segments the page already downloaded — supports negative values (sound earlier)"
+  },
+  "tipEnableHlsMux": {
+    "message": "Native HLS: pull the player's already-downloaded segments over the debugging protocol, no extra traffic (the browser shows a debugging banner); falls back to a second stream if that fails"
+  },
+  "tipEnableHlsSrc": {
+    "message": "Native HLS: play the same stream once more (decoded by the browser) — supports negative values (sound earlier). Uses about twice the data"
+  },
+  "tipEnableSrc": {
+    "message": "Play the audio of the same stream once more (decoded by the browser) — supports negative values (sound earlier). Uses about twice the data"
+  },
+  "btnNoBi": {
+    "message": "Not supported here"
+  },
+  "tipNoBiDash": {
+    "message": "The page's own player decodes this DASH (.mpd) manifest, so there is no audio channel to reuse. Delay mode still works"
+  },
+  "btnReload": {
+    "message": "Reload to apply"
+  },
+  "btnAuth": {
+    "message": "Needs site access"
+  },
+  "tipAuthRegistered": {
+    "message": "This site is already authorised, but the scripts weren't registered when this page loaded. One reload is enough"
+  },
+  "tipAuthNeed": {
+    "message": "Needs access to this site — clicking pops up the permission prompt"
+  },
+  "btnWaitTrack": {
+    "message": "Waiting for audio track"
+  },
+  "tipWaitTrack": {
+    "message": "The player hasn't written audio into MSE yet — let the video play a few seconds"
+  },
+  "btnWaitPlay": {
+    "message": "Waiting for playback"
+  },
+  "tipWaitPlay": {
+    "message": "The video hasn't started loading — press play first"
+  },
+  "whyHlsDirect": {
+    "message": "The video URL is a direct .m3u8 (native HLS); the data never passes through JS"
+  },
+  "whyDirectNoMse": {
+    "message": "The video is loaded directly, so its audio never goes through MSE"
+  },
+  "errTakeover": {
+    "message": "Take-over failed for an unknown reason"
+  },
+  "uiTitle": {
+    "message": "Audio Delay Sync"
+  },
+  "uiClose": {
+    "message": "Close"
+  },
+  "uiCloseAria": {
+    "message": "Close the notice"
+  },
+  "uiCollapse": {
+    "message": "Collapse"
+  },
+  "uiCollapseAria": {
+    "message": "Collapse the panel"
+  },
+  "uiStopClose": {
+    "message": "Stop and close"
+  },
+  "uiStopCloseAria": {
+    "message": "Stop taking over and close the panel"
+  },
+  "uiSliderAria": {
+    "message": "Delay in seconds; negative values pull the sound earlier"
+  },
+  "uiZero": {
+    "message": "Reset"
+  },
+  "uiMeterAria": {
+    "message": "Audio output level"
+  },
+  "uiTip": {
+    "message": "Wheel / ←→ for 100 ms steps"
+  },
+  "uiStop": {
+    "message": "Stop"
+  },
+  "actionTitleAuth": {
+    "message": "Click the icon to authorise bidirectional mode"
+  }
+}

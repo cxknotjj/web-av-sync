@@ -27,7 +27,10 @@ const ENHANCED_IDS = ['ads-main', 'ads-content'];
  *  上架版本来就没有这个文件，按需注入时 CAPTURE_BUILD 会直接回失败。 */
 function contentScriptFiles() {
   return [
-    'build-info.js', 'ads-template.js', 'ads-ui.js', 'ads-detect.js',
+    'build-info.js',
+    /* i18n 必须排在所有会输出文案的模块前面：它们加载时就要拿到 T */
+    'ads-i18n.js',
+    'ads-template.js', 'ads-ui.js', 'ads-detect.js',
     /* core → panel → route → sync → enhance：单向依赖，没有回头箭头 */
     'ads-enh-core.js', 'ads-enh-panel.js', 'ads-enh-route.js',
     'ads-enh-sync.js', 'ads-enhance.js',
@@ -257,14 +260,20 @@ async function markNeedGesture(tabId) {
   try {
     await chrome.action.setBadgeBackgroundColor({ color: '#22d3ee', tabId: tabId });
     await chrome.action.setBadgeText({ tabId: tabId, text: '↑' });
-    await chrome.action.setTitle({ tabId: tabId, title: '点一下图标，完成双向模式授权' });
+    await chrome.action.setTitle({
+      tabId: tabId,
+      title: chrome.i18n.getMessage('actionTitleAuth') || '点一下图标，完成双向模式授权'
+    });
   } catch (e) {}
 }
 
 async function clearNeedGesture(tabId) {
   try {
     await chrome.action.setBadgeText({ tabId: tabId, text: '' });
-    await chrome.action.setTitle({ tabId: tabId, title: '音画不同步调节器 · 点一下接管当前标签页' });
+    await chrome.action.setTitle({
+      tabId: tabId,
+      title: chrome.i18n.getMessage('actionTitle') || '音画不同步调节器 · 点一下接管当前标签页'
+    });
   } catch (e) {}
 }
 

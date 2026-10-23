@@ -753,6 +753,7 @@ background.js      service worker 入口：点图标接管、管理 offscreen、
 bg-auth.js         站点授权与增强脚本注册（permissions.request 的手势约束都在这）
 bg-capture.js      原生 HLS 抓切片：chrome.debugger + Network.getResponseBody（仅完整版）
 offscreen.html/js  音频处理：getUserMedia → DelayNode → destination
+ads-i18n.js        界面文案的多语言：T(key, 中文原文) → 中/英
 ads-template.js    面板与提示的样式、结构模板（纯字符串，不碰 DOM）
 ads-ui.js          面板、提示条、滑块/滚轮/键盘/拖动/全屏跟随 → window.ADS.ui
 ads-detect.js      页面检测：挑 video（全屏感知）、判断播放方式 → window.ADS.detect
@@ -769,12 +770,42 @@ package.json       npm 脚本（check / lint / test / build / ci）与开发依�
 eslint.config.js   ESLint flat config，只开 no-undef / no-unused-vars
 tools/             图标生成、商店素材生成、静态检查、打包、CDP 加载脚本
 .github/workflows/ci.yml  CI：check → lint → test → build → 校验产物
+_locales/          语言包：zh_CN / en，面板文案与 manifest 的 __MSG__
 store/             商店提交材料：文案、截图、隐私政策
 dist/              打好的提交包（package.js 产出，完整版与上架版各一份）
 ```
 
 后台三个模块用 `importScripts` 挂进 SW，和 `background.js` 共用同一个全局环境；
 内容脚本几个文件则是靠 manifest 的顺序加载，通过 `window.ADS` 串起来。
+
+### 界面文案
+
+面板、提示条、扩展名和简介都有中英两套，**跟着浏览器的界面语言自动切换**
+（`chrome.i18n.getUILanguage()`，`zh*` 走中文，其余走英文），没有手动开关。
+
+三处配合：
+
+| 位置 | 作用 |
+| --- | --- |
+| `_locales/<locale>/messages.json` | 文案表。`zh_CN` 是默认语言，只要放 manifest 用到的三个键；`en` 放全量 |
+| `manifest.json` | `default_locale` + `__MSG_extName__` / `__MSG_extDesc__` / `__MSG_actionTitle__` |
+| `ads-i18n.js` | 暴露 `window.ADS.i18n.t(key, 中文原文)`，各模块加载时解构成 `T` |
+
+**写新文案**：`T('someKey', '这里写中文')`，然后往 `_locales/en/messages.json` 加一条
+同名条目。中文不查表、直接用第二个参数——中文永远是"源码里写什么就显示什么"，
+不会因为漏改语言包而回退成旧文案。
+
+**缺翻译怎么办**：`t()` 查不到就用中文原文，界面上永远不会出现一个 `key` 名字。
+`npm test` 的 `[19]` 会核对「代码里用到的每个 key 都在 `en` 里有条目」，漏了直接红。
+
+**加第三种语言**：在 `_locales/<locale>/messages.json` 复制一份 `en` 的键、翻译值，
+再把 `ads-i18n.js` 里的 `lang` 判定从「中/英两种」改成按语言表匹配。键名必须是
+ASCII——Chrome 不接受中文键名。
+
+**`ads-template.js` 里的 `var T` 不能写成 `const`**：注入是按文件逐个执行的、
+共享同一个全局作用域，同一个文件被注入第二次时，顶层 `const` 会抛
+`Identifier 'T' has already been declared`，整份模板不执行——面板失去全部样式和结构，
+而页面上看不到任何异常。`[20]` 这条用例就是防这个的。
 
 ***
 

@@ -17,6 +17,8 @@
 (function () {
   window.ADS = window.ADS || {};
   const E = window.ADS.E = window.ADS.E || {};
+  /* 界面文案：中文写在第二个参数里，英文从 _locales/en 取（见 ads-i18n.js） */
+  const T = window.ADS.i18n ? window.ADS.i18n.t : function (key, zh) { return zh; };
 
   /* 重复注入（停止后再点图标）会把这些文件再跑一遍。以前整个大 IIFE 顶部
      一个守卫就够了，拆开之后每份都得自己挡：重建 S 会丢掉正在跑的
@@ -31,22 +33,25 @@
   const ROUTES = {
     mse: {
       id: '①',
-      name: '复用页面切片',
-      meta: '零流量',
-      hint: '播放器用 MSE 播放，音频片段已经在 appendBuffer 里被截下来了，直接复用，不额外下载'
+      name: T('routeMseName', '复用页面切片'),
+      meta: T('routeMseTag', '零流量'),
+      hint: T('routeMseDesc',
+        '播放器用 MSE 播放，音频片段已经在 appendBuffer 里被截下来了，直接复用，不额外下载')
     },
     capture: {
       id: '②',
-      name: '抓取已下载切片',
-      meta: '零流量',
-      hint: '原生 HLS：靠调试协议取回播放器已经下过的 ts 切片，不额外下载。' +
-        '代价是浏览器顶部会显示「正在调试此浏览器」，且用户自己开着 DevTools 时会失败'
+      name: T('routeCapName', '抓取已下载切片'),
+      meta: T('routeCapTag', '零流量'),
+      hint: T('routeCapDesc',
+        '原生 HLS：靠调试协议取回播放器已经下过的 ts 切片，不额外下载。'
+        + '代价是浏览器顶部会显示「正在调试此浏览器」，且用户自己开着 DevTools 时会失败')
     },
     src: {
       id: '③',
-      name: '重新拉一路',
-      meta: '约双倍流量',
-      hint: '同一条流再解码一遍只取声音。不需要授权、不需要刷新，但下载量大约翻倍'
+      name: T('routeSrcName', '重新拉一路'),
+      meta: T('routeSrcTag', '约双倍流量'),
+      hint: T('routeSrcDesc',
+        '同一条流再解码一遍只取声音。不需要授权、不需要刷新，但下载量大约翻倍')
     }
   };
 
@@ -209,6 +214,7 @@
     RESUME_LEAD: 1.5,         /* 缓冲领先目标位置这么多才放开 —— 要比 WAIT_GAP 大得多，
                                  否则一放开走两步又得按住，声音就是一顿一顿的 */
     DRIFT_SEEK: 0.35,         /* 音频位置偏差超过这个才 seek，小偏差用倍速慢慢追 */
+    MSE_NEAR: 1.0,            /* 链路① 认为「位置本来就算对」的阈值，同链路② 的第一档 */
     LOOP_COMP: 0.07,          /* 双向模式的声音要多走一段 tabCapture 回路：
                                  页面混音 → 捕获 → offscreen DelayNode → 扬声器。
                                  实测抓取侧 71ms、AudioContext 输出 24ms，减去画面
@@ -328,7 +334,7 @@
       if (!this.adToastAt || Date.now() - this.adToastAt >= C.AD_TOAST_GAP_MS) {
         this.adToastAt = Date.now();
         this.resumeNotice = true;
-        if (S.ui) S.ui.showToast('视频源已切换，正在重新接入音频…');
+        if (S.ui) S.ui.showToast(T('noticeSrcSwitch', '视频源已切换，正在重新接入音频…'));
       }
     },
 
@@ -343,7 +349,7 @@
           this.adToastAt = Date.now();
           this.resumeNotice = true;
           if (S.ui) {
-            S.ui.showToast('检测到广告插播，声音会暂停，广告结束后自动恢复');
+            S.ui.showToast(T('noticeAd', '检测到广告插播，声音会暂停，广告结束后自动恢复'));
           }
         }
       }
@@ -413,15 +419,18 @@
   function whyNoEnhanced() {
     switch (pageKind()) {
       case 'none':
-        return '这个页面没有找到视频元素。';
+        return T('whyNoVideoEl', '这个页面没有找到视频元素。');
       case 'unknown':
-        return '视频还没开始加载。先点一下播放，播几秒再试。';
+        return T('whyNotLoaded', '视频还没开始加载。先点一下播放，播几秒再试。');
       case 'stream':
-        return '这个页面播的是实时媒体流（MediaStream），音频不经过 MSE，双向模式用不了。延迟模式仍可用。';
+        return T('whyMediaStream',
+          '这个页面播的是实时媒体流（MediaStream），音频不经过 MSE，双向模式用不了。延迟模式仍可用。');
       case 'dash':
-        return '这个页面是 DASH（.mpd）清单，音频片段没有可复用的通道，双向模式用不了。延迟模式仍可用。';
+        return T('whyDash',
+          '这个页面是 DASH（.mpd）清单，音频片段没有可复用的通道，双向模式用不了。延迟模式仍可用。');
       default:
-        return '双向模式没有覆盖这种播放方式。请刷新页面重试，若仍复现请反馈。';
+        return T('whyUnsupported',
+          '双向模式没有覆盖这种播放方式。请刷新页面重试，若仍复现请反馈。');
     }
   }
 
@@ -472,7 +481,8 @@
       } catch (e2) {}
       if (S.appendFails >= 5 && !S.appendFailToasted && S.ui) {
         S.appendFailToasted = true;
-        S.ui.showToast('音频片段连续对不上（页面音轨有空洞），声音可能偶尔缺一截');
+        S.ui.showToast(T('toastGap',
+          '音频片段连续对不上（页面音轨有空洞），声音可能偶尔缺一截'));
       }
       setTimeout(pump, 0);
     }
@@ -730,6 +740,12 @@
          要退回 vT。这一段刚好是 trimBuffer 保留着的历史，能摆进去就得
          立刻摆 —— 不摆的话只能靠 0.9 倍速磨，1.6 秒要磨 16 秒，
          听感就是「点了归零，声音还慢一截」。 */
+      /* 非 capture 链路（① 复用的页面片段、③ 自己再拉一路）：目标点还没
+         缓冲到，但缓冲里明明有一段能播 —— 把位置挪过去，别让声音停在
+         几十秒前的内容上。链路① 的种子是从 0 秒开始 append 的，画面却
+         可能已经在一分钟处，这个分支不处理就是「画面在走、声音讲上集」。 */
+      if (S.enhMode !== 'capture' && catchUpToBuffered(want)) return true;
+
       if (S.enhMode === 'capture') {
         if (Date.now() - S.lastPosJump > C.POS_JUMP_MS) {
           if (trySetAudioPos(want)) { S.lastPosJump = Date.now(); return true; }
@@ -772,6 +788,49 @@
        跳转后想把音频位置先摆到目标点都摆不了。NaN 要当成 0 处理。 */
     const next = Math.max(want + 60, isFinite(cur) ? cur + 1 : 0);
     try { S.enhMS.duration = next; } catch (e) {}
+  }
+
+  /** 音频落后、目标点又没缓冲时，把位置往前挪一点。
+   *
+   *  为什么需要它：链路① 的片段从 0 秒开始按顺序 append，而画面可能已经
+   *  在一分钟的位置。目标点没缓冲到时老代码只是静静地不动 —— 声音继续播
+   *  0 秒那段，画面越走越远，差多少就一直差多少。
+   *
+   *  只处理一种情形：手上的数据全在目标点之前，那就贴到末尾往前 0.2 秒。
+   *  目标点落在空洞里时坚决不跳 —— 跳到空洞后面等于把还没到的时间的声音
+   *  提前放出来，比继续落后更难听；这种情况返回 false，由调用方静音等数据。
+   *
+   *  @param {number} want 目标时刻（秒，音频自己的时间轴）
+   *  @returns {boolean} 位置动过没有
+   */
+  function catchUpToBuffered(want) {
+    const a = S.enhAudio;
+    if (!a) return false;
+    let b;
+    try { b = a.buffered; } catch (e) { return false; }
+    if (!b.length) return false;
+
+    const cur = a.currentTime;
+    if (cur > want - C.DRIFT_SEEK) return false;   /* 不落后，不用贴 */
+
+    const tail = b.end(b.length - 1);
+    let target;
+    if (tail <= want) {
+      target = tail - 0.2;
+    } else {
+      /* 目标点之后还有数据：只有它本身被某一段盖住才值得跳。
+         顺带补上 bufferedHas 在末尾留 0.15 秒安全边距造成的
+         「明明有数据却判没数据」。 */
+      let covered = false;
+      for (let i = 0; i < b.length; i++) {
+        if (want >= b.start(i) && want <= b.end(i)) { covered = true; break; }
+      }
+      if (!covered) return false;
+      target = want;
+    }
+
+    if (!(target > cur + 0.25)) return false;
+    try { a.currentTime = target; return true; } catch (e) { return false; }
   }
 
   /** 硬 seek 到 t。目标点没有缓冲时也会设 currentTime，
@@ -1021,6 +1080,7 @@
     decideAim: decideAim,
     samplePtsOffset: samplePtsOffset,
     alignAudio: alignAudio,
+    catchUpToBuffered: catchUpToBuffered,
     seekAudioTo: seekAudioTo,
     trySetAudioPos: trySetAudioPos,
     trimBuffer: trimBuffer,

@@ -193,7 +193,8 @@
     }
 
     if (msg.type === 'panel-error') {
-      U.showToast(msg.text || '接管失败，原因未知');
+      U.showToast(msg.text
+        || (window.ADS.i18n ? window.ADS.i18n.t('errTakeover', '接管失败，原因未知') : '接管失败，原因未知'));
       return;
     }
 

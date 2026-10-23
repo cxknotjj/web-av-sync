@@ -30,6 +30,10 @@ const DIST = path.join(ROOT, 'dist');
 const INCLUDE = [
   'manifest.json',
   'build-info.js',
+  'ads-i18n.js',
+  /* 语言包：manifest 的 __MSG__ 和面板文案都从这里取 */
+  '_locales/zh_CN/messages.json',
+  '_locales/en/messages.json',
   'background.js',
   'bg-capture.js',
   'bg-auth.js',
@@ -181,21 +185,56 @@ function storeManifest(mf) {
 
 /* ---------------- 检查 ---------------- */
 
+/* manifest 里的 name / description 现在是 __MSG_xxx__，直接量长度或查违禁词
+   都会量到占位符本身。这里按语言包还原成真正的文案再校验 —— 每个语言各来一遍，
+   英文简介超长、或者出现别的浏览器名字，都会在这里被挡下。 */
+function resolveManifestText(text, locale) {
+  const f = path.join(ROOT, '_locales', locale, 'messages.json');
+  if (!fs.existsSync(f)) return text;
+  let msgs = {};
+  try { msgs = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return text; }
+  return String(text || '').replace(/__MSG_([A-Za-z0-9_]+)__/g, (all, key) =>
+    (msgs[key] && msgs[key].message) || all);
+}
+
+function manifestLocales() {
+  const dir = path.join(ROOT, '_locales');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((d) => fs.statSync(path.join(dir, d)).isDirectory());
+}
+
 function assertManifest(mf, entries) {
   const problems = [];
 
   if (mf.manifest_version !== 3) problems.push('manifest_version 必须是 3');
-  if (!mf.name || mf.name.length > 45) problems.push('name 必须存在且不超过 45 字符');
-  if (!mf.description || mf.description.length > 132) {
-    problems.push(`description 不超过 132 字符（当前 ${(mf.description || '').length}）`);
+
+  const locales = manifestLocales().length ? manifestLocales() : [''];
+  for (const loc of locales) {
+    const where = loc ? '[' + loc + '] ' : '';
+    const name = resolveManifestText(mf.name, loc);
+    const desc = resolveManifestText(mf.description, loc);
+    if (!name || name.length > 45) {
+      problems.push(where + `name 必须存在且不超过 45 字符（当前 ${name.length}）`);
+    }
+    if (!desc || desc.length > 132) {
+      problems.push(where + `description 不超过 132 字符（当前 ${desc.length}）`);
+    }
   }
   if (!/^\d+(\.\d+){0,3}$/.test(mf.version || '')) problems.push('version 格式不合法');
   if (mf.update_url) problems.push('update_url 必须删除，Edge 不接受');
 
-  /* Edge / Chrome 都要求：名称和描述里不能出现别的浏览器名字 */
+  /* Edge / Chrome 都要求：名称和描述里不能出现别的浏览器名字。
+     逐个语言查 —— 占位符本身永远不含违禁词，只查原文等于没查。 */
   const banned = /chrome|google chrome|firefox|safari|edge 浏览|chromium/i;
-  if (banned.test(mf.name || '')) problems.push('name 里不能出现其他浏览器名称');
-  if (banned.test(mf.description || '')) problems.push('description 里不能出现其他浏览器名称');
+  for (const loc of locales) {
+    const where = loc ? '[' + loc + '] ' : '';
+    if (banned.test(resolveManifestText(mf.name, loc))) {
+      problems.push(where + 'name 里不能出现其他浏览器名称');
+    }
+    if (banned.test(resolveManifestText(mf.description, loc))) {
+      problems.push(where + 'description 里不能出现其他浏览器名称');
+    }
+  }
 
   for (const size of [16, 32, 48, 128]) {
     if (!mf.icons || !mf.icons[String(size)]) problems.push(`缺少 ${size}x${size} 图标`);

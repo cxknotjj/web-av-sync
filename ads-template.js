@@ -8,6 +8,17 @@
  * 这里只放字符串，不碰 DOM。
  * ================================================================ */
 
+/* 面板里的静态文案也要跟着界面语言走。ads-i18n.js 先于本文件注入。
+ *
+ * 这里必须用 var 而不是 const：注入是按文件逐个执行、共享同一个全局作用域，
+ * 同一个文件被注入第二次时，顶层 const 会直接抛
+ * 「Identifier 'T' has already been declared」，整份脚本就此不执行 ——
+ * 面板的样式和结构全没了。var 重复声明是合法的，重复注入最多是白做一次。 */
+var T = (function () {
+  const i = window.ADS && window.ADS.i18n;
+  return i ? i.t : function (key, zh) { return zh; };
+})();
+
 window.ADS_STYLE = {
   /* 提示条用 ok / 失败两套配色，所以做成函数 */
   toast: function (ok) {
@@ -66,7 +77,7 @@ window.ADS_STYLE = {
       <div class="toast" role="status" aria-live="polite">
         <span class="bar"></span>
         <span class="txt"></span>
-        <button class="x" type="button" title="关闭" aria-label="关闭提示">×</button>
+        <button class="x" type="button" title="${T('uiClose', '关闭')}" aria-label="${T('uiCloseAria', '关闭提示')}">×</button>
       </div>`;
   },
 
@@ -343,10 +354,10 @@ window.ADS_STYLE = {
     <div class="panel">
       <div class="head">
         <span class="dot"></span>
-        <span class="title">音画不同步调节器</span>
+        <span class="title">${T('uiTitle', '音画不同步调节器')}</span>
         <span class="grow"></span>
-        <button class="icon" data-act="collapse" title="收起" aria-label="收起面板">−</button>
-        <button class="icon" data-act="close" title="停止并关闭" aria-label="停止接管并关闭面板">×</button>
+        <button class="icon" data-act="collapse" title="${T('uiCollapse', '收起')}" aria-label="${T('uiCollapseAria', '收起面板')}">−</button>
+        <button class="icon" data-act="close" title="${T('uiStopClose', '停止并关闭')}" aria-label="${T('uiStopCloseAria', '停止接管并关闭面板')}">×</button>
       </div>
       <div class="body">
         <div class="readout">
@@ -354,27 +365,27 @@ window.ADS_STYLE = {
           <span class="unit">s</span>
         </div>
         <input type="range" min="-10000" max="10000" step="100" value="0" data-el="slider"
-               aria-label="延迟秒数，负值表示声音提前">
+               aria-label="${T('uiSliderAria', '延迟秒数，负值表示声音提前')}">
         <div class="steps">
           <button data-step="-1000">−1s</button>
           <button data-step="-100">−100</button>
-          <button data-step="0">归零</button>
+          <button data-step="0">${T('uiZero', '归零')}</button>
           <button data-step="100">+100</button>
           <button data-step="1000">+1s</button>
         </div>
         <div class="mode">
-          <span class="mode-tag" data-el="modeTag">延迟</span>
-          <button class="mode-btn" data-act="mode" data-el="modeBtn" hidden>启用双向</button>
+          <span class="mode-tag" data-el="modeTag">${T('tagDelay', '延迟')}</span>
+          <button class="mode-btn" data-act="mode" data-el="modeBtn" hidden>${T('btnEnable', '启用双向')}</button>
         </div>
         <div class="route" data-el="route" hidden>
           <span class="route-id" data-el="routeId"></span>
           <span class="route-name" data-el="routeName"></span>
           <span class="route-meta" data-el="routeMeta"></span>
         </div>
-        <div class="meter" role="img" aria-label="音频输出电平"><div class="bar" data-el="bar"></div></div>
+        <div class="meter" role="img" aria-label="${T('uiMeterAria', '音频输出电平')}"><div class="bar" data-el="bar"></div></div>
         <div class="foot">
-          <span class="tip" data-el="tip">滚轮 / ←→ 微调 100ms</span>
-          <button class="stop" data-act="stop">停止</button>
+          <span class="tip" data-el="tip">${T('uiTip', '滚轮 / ←→ 微调 100ms')}</span>
+          <button class="stop" data-act="stop">${T('uiStop', '停止')}</button>
         </div>
       </div>
     </div>`

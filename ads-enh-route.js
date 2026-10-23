@@ -16,6 +16,8 @@
 (function () {
   window.ADS = window.ADS || {};
   const E = window.ADS.E;
+  /* 界面文案：中文写在第二个参数里，英文从 _locales/en 取（见 ads-i18n.js） */
+  const T = window.ADS.i18n ? window.ADS.i18n.t : function (key, zh) { return zh; };
 
   /* 每个文件都得自己挡重复注入，理由见 ads-enh-core.js 顶部 */
   if (!E || !E.core || E.route) return;
@@ -70,7 +72,7 @@
     createEnhAudioMSE().__adsOwn = true;
 
     S.enhGuard = setTimeout(function () {
-      L.fail('没截到可用的音频数据，已放弃双向模式，视频声音保持原样。');
+      L.fail(T('failNoAudioData', '没截到可用的音频数据，已放弃双向模式，视频声音保持原样。'));
     }, C.MSE_READY_MS);
     whenCanPlay(L.ready);
 
@@ -88,7 +90,7 @@
         }
         pump();
       } catch (e) {
-        L.fail('音频轨初始化失败：' + ((e && e.message) || e));
+        L.fail(T('failAudioInit', '音频轨初始化失败：') + ((e && e.message) || e));
       }
     });
   }
@@ -116,9 +118,10 @@
       fellBack = true;
       const keep = S.videoEl;
       /* 降级要留痕：不弹一次提示的话，用户只会看到流量翻倍却不知道为什么 */
-      S.routeWhy = '抓切片失败（调试器被占用，或页面上没有新的切片请求），已自动降级';
+      S.routeWhy = T('failCaptureAttach',
+        '抓切片失败（调试器被占用，或页面上没有新的切片请求），已自动降级');
       L.fail(null, function () { if (keep) startViaSrc(keep); });
-      if (S.ui) S.ui.showToast('没抓到切片，已改为重新拉一路（约多一倍流量）');
+      if (S.ui) S.ui.showToast(T('failCaptureFallback', '没抓到切片，已改为重新拉一路（约多一倍流量）'));
     };
 
     createEnhAudioMSE();
@@ -160,8 +163,8 @@
       return Promise.reject(e);
     }
     return Promise.resolve(p).then(function (r) {
-      if (!r || !r.ok) throw new Error((r && r.error) || 'mux.js 注入失败');
-      if (typeof muxjs === 'undefined') throw new Error('mux.js 注入后仍不可用');
+      if (!r || !r.ok) throw new Error((r && r.error) || T('errMuxLoad', 'mux.js 注入失败'));
+      if (typeof muxjs === 'undefined') throw new Error(T('errMuxUse', 'mux.js 注入后仍不可用'));
     });
   }
 
@@ -176,7 +179,7 @@
     createEnhAudio().src = v.currentSrc || v.src;
 
     S.enhGuard = setTimeout(function () {
-      L.fail('音频流加载超时，已放弃双向模式，视频声音保持原样。');
+      L.fail(T('failSrcTimeout', '音频流加载超时，已放弃双向模式，视频声音保持原样。'));
     }, C.SRC_READY_MS);
     whenCanPlay(L.ready);
   }
@@ -306,7 +309,7 @@
   function enterEnhanced() {
     const v = pickVideo();
     if (!v) {
-      if (S.ui) S.ui.showToast('这个页面没有找到视频元素');
+      if (S.ui) S.ui.showToast(T('whyNoVideo', '这个页面没有找到视频元素'));
       return;
     }
 
@@ -327,16 +330,18 @@
     if (route === 'src') {
       /* 记下为什么没走更省的链路 —— 这两种情况代价差一倍，用户有权知道 */
       S.routeWhy = kind === 'direct'
-        ? '页面是直连媒体（.mp4 / 非 m3u8），没有切片可抓，只能重新拉一路'
-        : '有 m3u8 但取不到切片数据';
+        ? T('whyDirectMedia', '页面是直连媒体（.mp4 / 非 m3u8），没有切片可抓，只能重新拉一路')
+        : T('whyNoSegData', '有 m3u8 但取不到切片数据');
       startViaSrc(v);
       return;
     }
 
     if (S.ui) {
       S.ui.showToast(S.hookReady
-        ? '音频片段还没攒到，先让视频播放几秒再试。'
-        : (pageIsMSE() ? '还没截到音频轨，先让视频播放几秒再点。' : whyNoEnhanced()));
+        ? T('hintWaitSeg', '音频片段还没攒到，先让视频播放几秒再试。')
+        : (pageIsMSE()
+          ? T('hintWaitTrack', '还没截到音频轨，先让视频播放几秒再点。')
+          : whyNoEnhanced()));
     }
   }
 

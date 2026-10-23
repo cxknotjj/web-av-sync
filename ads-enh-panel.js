@@ -15,6 +15,8 @@
 (function () {
   window.ADS = window.ADS || {};
   const E = window.ADS.E;
+  /* 界面文案：中文写在第二个参数里，英文从 _locales/en 取（见 ads-i18n.js） */
+  const T = window.ADS.i18n ? window.ADS.i18n.t : function (key, zh) { return zh; };
 
   /* 每个文件都得自己挡重复注入，理由见 ads-enh-core.js 顶部 */
   if (!E || !E.core || E.panel) return;
@@ -59,10 +61,11 @@
     S.ui.setRoute({
       id: routeId(id),
       /* 「将用」是给还没点的用户看的，分清预告和生效 */
-      name: S.enhMode ? r.name : '将用 ' + r.name,
+      name: S.enhMode ? r.name : T('pmUsePrefix', '将用 ') + r.name,
       /* 链路选定了但还没出声（在等数据、等降级），别让用户以为已经生效 */
-      meta: S.enhMode && !S.enhanced ? '连接中…' : r.meta,
-      hint: (S.enhMode === 'src' && S.routeWhy) ? r.hint + ' ｜ 原因：' + S.routeWhy : r.hint,
+      meta: S.enhMode && !S.enhanced ? T('pmConnecting', '连接中…') : r.meta,
+      hint: (S.enhMode === 'src' && S.routeWhy)
+        ? r.hint + T('pmReason', ' ｜ 原因：') + S.routeWhy : r.hint,
       on: S.enhanced
     });
 
@@ -83,34 +86,34 @@
       /* -999 是「一段缓冲都没有」的哨兵值，别拿它算成「还差 999 秒」。
          lead 为正 = 数据其实已经够播到目标位置，只是余量还没到 RESUME_LEAD，
          这时候写「还差 0.0s」会让人以为卡死了。 */
-      if (lead <= -900) S.ui.setRouteMeta('等缓冲 · 下载中…');
-      else if (lead > 0) S.ui.setRouteMeta('等缓冲 · 数据已到，准备恢复');
-      else S.ui.setRouteMeta('等缓冲 · 还差 ' + (-lead).toFixed(1) + 's');
+      if (lead <= -900) S.ui.setRouteMeta(T('pmStallDown', '等缓冲 · 下载中…'));
+      else if (lead > 0) S.ui.setRouteMeta(T('pmStallReady', '等缓冲 · 数据已到，准备恢复'));
+      else S.ui.setRouteMeta(T('pmStallLeft', '等缓冲 · 还差 ') + (-lead).toFixed(1) + 's');
       return;
     }
 
     /* 广告插播 / 换源期间主音轨会断一段。明确写出来，别让用户以为扩展坏了。
        foreignAt 一直保留到正片切片回来为止，广告中途停顿也不会来回闪。 */
     if (S.cap && S.cap.isAd()) {
-      S.ui.setRouteMeta(r.meta + ' · 广告插播中，声音稍后恢复');
+      S.ui.setRouteMeta(r.meta + T('pmAd', ' · 广告插播中，声音稍后恢复'));
       return;
     }
     if (S.cap && S.cap.swapAt && Date.now() - S.cap.swapAt < C.SWAP_HINT_MS) {
-      S.ui.setRouteMeta(r.meta + ' · 播放源切换中，正在接音频…');
+      S.ui.setRouteMeta(r.meta + T('pmSwap', ' · 播放源切换中，正在接音频…'));
       return;
     }
 
     /* 链路② 跳转后音频在重新加载、画面照常走。这时候报「可安全提前 0.0s」
        会被当成功能坏了，直接说明正在干什么。 */
     if (S.audioSilent) {
-      S.ui.setRouteMeta(r.meta + ' · 音频重新加载中，画面继续');
+      S.ui.setRouteMeta(r.meta + T('pmReload', ' · 音频重新加载中，画面继续'));
       return;
     }
 
     /* 正在对齐时数字没有意义：currentTime 已经指向目标，数据不一定在那。
        直接说在干什么，避免又出现一个「0.0s」。 */
     if (S.enhAudio.seeking) {
-      S.ui.setRouteMeta(r.meta + ' · 对齐中…');
+      S.ui.setRouteMeta(r.meta + T('pmAligning', ' · 对齐中…'));
       return;
     }
 
@@ -121,8 +124,9 @@
     if (S.enhMode === 'capture') {
       const off = S.enhAudio.currentTime - wantTime();
       if (Math.abs(off) > 0.4) {
-        S.ui.setRouteMeta(r.meta + ' · 对齐中，'
-          + (off > 0 ? '音频快 ' : '音频慢 ') + Math.abs(off).toFixed(1) + 's');
+        S.ui.setRouteMeta(r.meta + T('pmAlignAt', ' · 对齐中，')
+          + (off > 0 ? T('pmAhead', '音频快 ') : T('pmBehind', '音频慢 '))
+          + Math.abs(off).toFixed(1) + 's');
         return;
       }
     }
@@ -144,7 +148,7 @@
        否则「可安全提前」会虚高一个固定偏移（实测 1.6s）。 */
     const base = S.enhMode === 'capture' ? S.ptsOffset : 0;
     const ahead = lead > 0 ? Math.max(0, (aT - base - vT) + lead) : 0;
-    S.ui.setRouteMeta(r.meta + ' · 可安全提前 ' + ahead.toFixed(1) + 's');
+    S.ui.setRouteMeta(r.meta + T('pmAdvance', ' · 可安全提前 ') + ahead.toFixed(1) + 's');
   }
 
   function publishState() {
@@ -207,8 +211,10 @@
   function paintModeUI() {
     if (!S.ui) return;
 
-    S.ui.setTip(S.enhanced ? '负值让声音提前 · 滚轮可调' : '只延后声音 · 滚轮可调');
-    S.ui.setModeTag(S.enhanced ? '双向' : '延迟', S.enhanced);
+    S.ui.setTip(S.enhanced
+      ? T('tipEnhanced', '负值让声音提前 · 滚轮可调')
+      : T('tipDelayOnly', '只延后声音 · 滚轮可调'));
+    S.ui.setModeTag(S.enhanced ? T('tagBi', '双向') : T('tagDelay', '延迟'), S.enhanced);
     /* 判一次就够了：paintRoute 和下面的按钮文案用的是同一个结果。
        paintRoute 里已经发布过一次状态，这里不再重复 publishState。 */
     const kind = pageKind();
@@ -220,36 +226,42 @@
     }
 
     if (S.hookReady) {
-      S.ui.setModeBtn('启用双向', '复用页面已经下载的音频片段，支持负值（声音提前）', false);
+      S.ui.setModeBtn(T('btnEnable', '启用双向'),
+        T('tipEnableMse', '复用页面已经下载的音频片段，支持负值（声音提前）'), false);
       return;
     }
 
     if (kind === 'hls') {
       /* mux.js 现在按需注入，面板文案只看这条链路有没有被裁掉即可 */
-      S.ui.setModeBtn('启用双向', captureEnabled()
-        ? '原生 HLS：先用调试协议取回播放器已下载的切片，不额外耗流量（浏览器顶部会提示正在调试）；取不到时自动改为重新拉一路'
-        : '原生 HLS：用同一条流再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量', false);
+      S.ui.setModeBtn(T('btnEnable', '启用双向'), captureEnabled()
+        ? T('tipEnableHlsMux',
+          '原生 HLS：先用调试协议取回播放器已下载的切片，不额外耗流量（浏览器顶部会提示正在调试）；取不到时自动改为重新拉一路')
+        : T('tipEnableHlsSrc',
+          '原生 HLS：用同一条流再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量'), false);
       return;
     }
 
     if (kind === 'direct') {
-      S.ui.setModeBtn('启用双向', '用同一条流的音频再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量', false);
+      S.ui.setModeBtn(T('btnEnable', '启用双向'),
+        T('tipEnableSrc', '用同一条流的音频再播一遍（浏览器直接解码），支持负值（声音提前）。会多用一倍流量'), false);
       return;
     }
 
     /* DASH：<audio> 喂不进 .mpd 清单，点下去只会白等 15 秒再失败，
        所以按钮直接说明不支持，别让用户去授权、去刷新折腾一圈 */
     if (kind === 'dash') {
-      S.ui.setModeBtn('此页不支持双向', 'DASH（.mpd）清单由页面自己的播放器解码，音频片段没有可复用的通道。延迟模式仍可用', false);
+      S.ui.setModeBtn(T('btnNoBi', '此页不支持双向'),
+        T('tipNoBiDash', 'DASH（.mpd）清单由页面自己的播放器解码，音频片段没有可复用的通道。延迟模式仍可用'), false);
       return;
     }
 
     if (!S.hookInstalled) {
       S.ui.setModeBtn(
-        S.permGranted ? '刷新页面生效' : '双向需授权',
+        S.permGranted ? T('btnReload', '刷新页面生效') : T('btnAuth', '双向需授权'),
         S.permGranted
-          ? '这个站点已经授权，但当前页面加载时脚本还没注册上。刷新一次即可'
-          : '需要当前站点的访问权限，点一下会弹出授权框',
+          ? T('tipAuthRegistered',
+            '这个站点已经授权，但当前页面加载时脚本还没注册上。刷新一次即可')
+          : T('tipAuthNeed', '需要当前站点的访问权限，点一下会弹出授权框'),
         false
       );
       return;
@@ -257,13 +269,15 @@
 
     /* 脚本装上了却没截到音频轨：要么还没开始播，要么根本不是 MSE */
     if (kind === 'mse') {
-      S.ui.setModeBtn('等待音频轨', '播放器还没往 MSE 里写音频，先让视频播放几秒', false);
+      S.ui.setModeBtn(T('btnWaitTrack', '等待音频轨'),
+        T('tipWaitTrack', '播放器还没往 MSE 里写音频，先让视频播放几秒'), false);
     } else if (kind === 'unknown') {
-      S.ui.setModeBtn('等待播放', '视频还没开始加载，先点一下播放', false);
+      S.ui.setModeBtn(T('btnWaitPlay', '等待播放'),
+        T('tipWaitPlay', '视频还没开始加载，先点一下播放'), false);
     } else {
-      S.ui.setModeBtn('此页不支持双向', kind === 'hls'
-        ? '视频地址是 .m3u8 直连（原生 HLS），数据不经过 JS'
-        : '视频是直连的，音频数据不经过 MSE', false);
+      S.ui.setModeBtn(T('btnNoBi', '此页不支持双向'), kind === 'hls'
+        ? T('whyHlsDirect', '视频地址是 .m3u8 直连（原生 HLS），数据不经过 JS')
+        : T('whyDirectNoMse', '视频是直连的，音频数据不经过 MSE'), false);
     }
   }
 

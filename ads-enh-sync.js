@@ -16,6 +16,8 @@
 (function () {
   window.ADS = window.ADS || {};
   const E = window.ADS.E;
+  /* 界面文案：中文写在第二个参数里，英文从 _locales/en 取（见 ads-i18n.js） */
+  const T = window.ADS.i18n ? window.ADS.i18n.t : function (key, zh) { return zh; };
 
   /* 每个文件都得自己挡重复注入，理由见 ads-enh-core.js 顶部 */
   if (!E || !E.core || !E.panel || E.sync) return;
@@ -25,6 +27,7 @@
   const {
     pump, bufferedHas, bufferedLead, bufferedEnd,
     alignAudio, seekAudioTo, trySetAudioPos, trimBuffer, currentMs,
+    catchUpToBuffered,
     wantAt, wantTime, syncCapturePipe, forcePipe, syncDelayToSw,
     samplePtsOffset, silenceBudget, resetSamples, resetVideoClock, resetStream,
     decideSilence, decideAim
@@ -47,7 +50,7 @@
       S.cap.resumeNotice = false;
       /* 超过一分钟就别报了：用户早忘了那次中断，突然弹「已恢复」反而莫名其妙 */
       if (S.ui && Date.now() - S.cap.adToastAt < C.RESUME_NOTICE_MS) {
-        S.ui.showToast('声音已恢复');
+        S.ui.showToast(T('toastResumed', '声音已恢复'));
       }
     }
   }
@@ -97,10 +100,12 @@
   }
 
   function stallNow() {
-    /* 链路② 绝不按画面 —— 按住播放器等于断掉它自己的数据源。
-       syncTick 已经把这条链路分流走了，这里只是兜底，防止以后有人
+    /* 链路① 和 ② 都绝不按画面：它们的数据全部来自「页面自己 append 了
+       什么」，画面一停，播放器就不再下载、不再 append，我们等的是一个
+       永远不会来的包 —— 越等越死，最后只能超时退出双向。
+       syncTick 已经把这两条链路分流走了，这里只是兜底，防止以后有人
        在别处直接调 stallNow()。 */
-    if (S.enhMode === 'capture') return;
+    if (S.enhMode === 'capture' || S.enhMode === 'mse') return;
 
     if (!S.stalledByUs) {
       S.stalledByUs = true;
@@ -112,7 +117,7 @@
          一次等待只弹一条，且 20 秒冷却 —— 网络差导致连环等待时不刷屏。 */
       if (S.ui && Date.now() - S.lastStallToast > C.STALL_TOAST_MS) {
         S.lastStallToast = Date.now();
-        S.ui.showToast('缓冲跟不上提前量，画面暂停等待下载…');
+        S.ui.showToast(T('toastStall', '缓冲跟不上提前量，画面暂停等待下载…'));
       }
       publishState();
     }
@@ -132,7 +137,7 @@
       p.catch(function () {
         /* 浏览器拒绝恢复播放（极罕见）。停在这儿等于把用户的视频卡死，
            不如直接退回页面原声 —— 至少画面能继续走。 */
-        if (S.ui) S.ui.showToast('视频没能自动恢复播放，已退出双向模式');
+        if (S.ui) S.ui.showToast(T('failResume', '视频没能自动恢复播放，已退出双向模式'));
         L.exit();
       });
     }
@@ -161,7 +166,7 @@
        老实退回页面原声，至少声画是配套的。 */
     const afterGiveUp = bufferedLead(wantAt(target));
     if (target === currentMs() || afterGiveUp < -C.WAIT_GAP) {
-      L.fail('这个位置的音频还没下载到，已退出双向模式，声音回到页面原声。');
+      L.fail(T('failNoDataAtPos', '这个位置的音频还没下载到，已退出双向模式，声音回到页面原声。'));
       return;
     }
 
@@ -177,8 +182,9 @@
 
     if (S.ui) {
       S.ui.showToast(target === 0
-        ? '缓冲一直没跟上，提前量已归零，只保留延迟。'
-        : '缓冲跟不上，提前量已自动降到 ' + Math.abs(target / 1000).toFixed(1) + ' 秒。');
+        ? T('toastZeroAdvance', '缓冲一直没跟上，提前量已归零，只保留延迟。')
+        : T('toastLowerAdv', '缓冲跟不上，提前量已自动降到 ')
+          + Math.abs(target / 1000).toFixed(1) + T('unitSecondsDot', ' 秒。'));
     }
 
     alignAudio(wantTime());
@@ -198,14 +204,14 @@
   function degradeCapture() {
     if (S.enhMode !== 'capture') return;
     const keep = S.videoEl;
-    if (S.ui) S.ui.showToast('音频一直等不到数据，已改为重新拉一路（约多一倍流量）');
+    if (S.ui) S.ui.showToast(T('failDegradeSrc', '音频一直等不到数据，已改为重新拉一路（约多一倍流量）'));
     L.fail(null, function () {
       const R = window.ADS && window.ADS.E && window.ADS.E.route;
       if (!keep || !R || !R.startViaSrc) return;
       R.startViaSrc(keep);
       /* exitEnhanced 会把 routeWhy 清空，所以降级原因要在切完之后重写，
          否则面板上看不出「为什么从链路② 掉到了 ③」。 */
-      S.routeWhy = '抓不到足够的切片，已自动降级';
+      S.routeWhy = T('toastDegraded', '抓不到足够的切片，已自动降级');
       publishState();
     });
   }
@@ -219,6 +225,98 @@
    *  代价是跳转后可能有一小段没声音（播放器正在重新加载新位置的切片）。
    *  这是刻意接受的：宁可无声几秒，也不让画面卡住十几秒再降档。
    */
+  /* ---------------- 链路①：复用页面的 appendBuffer ----------------
+   * 和链路② 同源：数据全部来自「页面自己 append 了什么」。一旦按住画面，
+   * 播放器就停止下载和 append，我们的队列再也不增长。所以这条链路同样
+   * 不许 stall，只能「画面照走、音频追」。
+   *
+   * 这里以前走的是通用分支，而通用分支在「目标点落在缓冲外面一点点」时
+   * 两头都不管：不 seek（bufferedHas 为假）、也不 stall（还没越过 WAIT_GAP），
+   * 于是音频老老实实从 0 秒往下播。画面已经到 14.6 秒、声音还在讲 0 秒
+   * 的内容，差多少就一直差多少；等差距终于涨到要 stall 时，数据源跟着
+   * 画面一起停了，只剩 15 秒后超时退出双向这一条路。
+   */
+  function mseTick() {
+    if (S.videoEl.paused && !S.videoEl.seeking) {
+      if (!S.enhAudio.paused) { try { S.enhAudio.pause(); } catch (e) {} }
+      if (S.audioSilent) { S.audioSilent = false; S.silentSince = 0; publishState(); }
+      return;
+    }
+
+    /* 画面冻住（播放器断流 / 站点自己暂停推进）时 paused 仍是 false，
+       不拦一下的话音频会独自往前跑，越跑越远。判据同链路②。 */
+    const vt = S.videoEl.currentTime;
+    if (S.vFreezePos === null || Math.abs(vt - S.vFreezePos) > 0.01) {
+      S.vFreezePos = vt;
+      S.vFreezeAt = Date.now();
+    } else if (Date.now() - S.vFreezeAt > 700) {
+      if (!S.enhAudio.paused) { try { S.enhAudio.pause(); } catch (e) {} }
+      return;
+    }
+
+    const want = wantTime();
+    const drift = S.enhAudio.currentTime - want;
+
+    /* 一档：位置本来就对。提前模式下 want 常常落在缓冲末尾之外几十毫秒，
+       拿 bufferedHas 当唯一判据会误判成「没数据」，于是反复静音、反复摆位置。 */
+    if (Math.abs(drift) < C.MSE_NEAR) {
+      const ok = alignAudio(want);
+      if (ok !== false && S.enhAudio.readyState >= 2) {
+        if (S.audioSilent) markAudible();
+        if (S.enhAudio.paused) {
+          const p = S.enhAudio.play();
+          if (p && p.catch) p.catch(function () {});
+        }
+        paintRouteMeta();
+        return;
+      }
+    }
+
+    /* 二档：目标点有数据 —— 对齐后立刻出声 */
+    if (bufferedHas(want)) {
+      markAudible();
+      if (S.enhAudio.paused) {
+        const p = S.enhAudio.play();
+        if (p && p.catch) p.catch(function () {});
+      }
+      alignAudio(want);
+      paintRouteMeta();
+      return;
+    }
+
+    /* 三档：目标点还没数据。画面继续走（按住了就等于断粮），声音先停，
+       位置贴到缓冲里能播的最靠前一点，等 append 追上来再出声。
+       这一步是「画面已到 14.6 秒、种子才 0~14.6」时唯一能救回来的动作：
+       不贴的话声音会一直播 0 秒那段。 */
+    if (!S.audioSilent) {
+      S.audioSilent = true;
+      S.silentSince = Date.now();
+      publishState();
+    }
+    try { if (!S.enhAudio.paused) S.enhAudio.pause(); } catch (e) {}
+    catchUpToBuffered(want);
+
+    /* 画面自己也没这一段（video 的缓冲不覆盖当前位置）：它在转圈等下载，
+       我们等的是同一批数据。这段时间不算「音频出问题」—— 实测 jyctv
+       拖到 200 秒要 9 秒才拿到切片，8 秒就退出等于白等。 */
+    try {
+      const vb = S.videoEl.buffered;
+      let vHasData = false;
+      for (let i = 0; i < vb.length; i++) {
+        if (vt >= vb.start(i) && vt <= vb.end(i) - 0.1) { vHasData = true; break; }
+      }
+      if (!vHasData) S.silentSince = Date.now();
+    } catch (e) {}
+
+    /* 静音太久：这条链路的数据是页面自己解的，正常最多等一两秒。
+       八秒还接不上就不再折腾了，退回页面原声 —— 至少画面和声音是配套的。 */
+    if (S.silentSince && Date.now() - S.silentSince > C.CAP_SILENT_MAX_MS) {
+      L.fail(T('failMseSilent', '音频没跟上画面，已退出双向模式，声音回到页面原声。'));
+      return;
+    }
+    paintRouteMeta();
+  }
+
   function captureTick() {
     /* 用户自己按的暂停 —— 注意要和「seek 之后卡在等数据」分开：
        后者 paused 也会变 true（浏览器在无数据的 seeking 里会置位），
@@ -389,8 +487,8 @@
            确认送到了，否则降档会静默失败，面板写着新值、声音还是旧的。 */
         forcePipe(target);
         if (S.ui) {
-          S.ui.showToast('缓冲跟不上，提前量已自动降到 '
-            + Math.abs(target / 1000).toFixed(1) + ' 秒');
+          S.ui.showToast(T('toastLowerAdv', '缓冲跟不上，提前量已自动降到 ')
+            + Math.abs(target / 1000).toFixed(1) + T('unitSeconds', ' 秒'));
         }
       }
     }
@@ -469,6 +567,9 @@
      * 播放器就不再发请求，音频永远等不到，等于自己把自己的粮断了。
      * 详见 captureTick()。 */
     if (S.enhMode === 'capture') { captureTick(); return; }
+
+    /* 链路① 同理，也不能进下面「等缓冲」那一段（见 mseTick 的注释）。 */
+    if (S.enhMode === 'mse') { mseTick(); return; }
 
     /* ---------------- 正在等缓冲 ----------------
      * 这一段必须放在「videoEl.paused 就停音频」前面：等缓冲时视频正是被我们自己
