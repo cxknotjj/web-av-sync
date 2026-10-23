@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "音画不同步调节器",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "接管当前标签页的音频输出做实时延迟，修正音画不同步。页面播放器、进度条、画质切换全部不动。",
   "minimum_chrome_version": "116",
   "permissions": [
