@@ -23,9 +23,9 @@ Partner Center 各字段的**可复制文案**。除特别说明外，均为中�
 > **改名记录**：`name` 由「音画偏移 · 标签页音频」改为「音画不同步调节器」（2026-10-21），
 > 同步改了 `default_title`、`bg-auth.js` 的 `setTitle`、`ads-template.js` 的面板标题、
 > README 标题、隐私政策（中英名与日期）。
-> **`screenshot-1-scene.png` 和 `screenshot-2-panel.png` 是改名之前重绘的示意图**，
-> 面板左上角仍写着旧名「音画偏移」。这两张要么用 `tools/make-store-assets.py` 重绘，
-> 要么直接换成真机截图（`screenshot-3/4/5-live*.png`，标题已是新名）。
+> **两张示意图已于 2026-10-23 重绘**（`tools/make-store-assets.py`）：标题换成新名，
+> 并补上面板后来新增的「模式 / 启用双向」一行。之前的图少这一行，按政策 1.1.2
+> 「渲染正确」的口径属于与实际功能不符，不要再用旧图。
 
 ---
 
@@ -185,12 +185,25 @@ No data collected, no data uploaded. Audio lives in memory for the delay duratio
 > 前两张是 `tools/make-store-assets.py` 按真实配色重绘的示意图，带标注，信息量比真机图大；
 > 后三张是真机截图（`test-env/shoot.js` 跑出来的，Edge 151 + 上架版扩展 + 本地 HLS 演示页）。
 >
+> 示意图的控件行数是照 `ads-template.js` 一行一行对的：标题 / 读数 / 滑块 / 五个步进按钮 /
+> **模式标签 + 启用双向** / 电平条 / 底栏。**面板结构改了就重绘这张图**，否则就是
+> 「示意图与功能不一致」——之前漏掉中间那一行正是这么产生的。
+>
 > **推荐提交顺序**：`screenshot-1-scene` → `screenshot-2-panel` → `screenshot-4-live-delay`
 > → `screenshot-5-live-collapsed`。四张刚好覆盖「场景 / 控件说明 / 实际效果 / 收起态」。
 > `screenshot-3-live`（0.000）和 `screenshot-4-live-delay`（2.400）画面几乎一样，只放一张就够。
 >
 > 画面里的演示片源是 Big Buck Bunny 片头（Blender Foundation，CC-BY 3.0），
 > 用于商店截图没有问题；页面本身是本地 `test-env/hls/demo.html`，不是任何真实站点。
+
+**怎么重绘示意图**
+
+```cmd
+python tools/make-store-assets.py
+```
+
+> 依赖 Pillow（`pip install pillow`）。脚本按 2 倍超采样绘制再缩回，一次性覆盖
+> 两张 1280×800 截图、两张推广图（640×400 / 440×280）和 300×300 的 logo。
 
 **怎么重截**
 
@@ -364,11 +377,14 @@ CDN、没有远程脚本、没有任何网络请求。`package.js` 会断言这�
 
 **两个审核可能追问的点，先想好怎么答：**
 
+> 这两段的英文原文已经写进**第五节的 `Certification notes`**（`WHAT THE EXTENSION READS
+> AND STORES` 一节）。提交时不用再单独找地方粘，那是给审核员看的固定位置；
+> 下面保留中文依据，被追问时按这个口径解释。
+
 **① Website content（页面有 `<video>`、还注入脚本）**
 
 扩展只读取 `<video>` 元素自身的时间属性（`currentTime`、`buffered`、`currentSrc`），用于对齐延迟；
 不读取 DOM 文本、图片、链接、表单，也不读 URL 的 path 和 query。
-在 `Certification notes` 里写一句即可：
 
 ```
 The content script reads only the time-related properties of <video> elements
@@ -463,6 +479,23 @@ ABOUT THE OPTIONAL BIDIRECTIONAL MODE (the small button on the panel):
   either route. This submitted package does not request the "debugger" permission.
 - The panel always displays which route is in use, so behaviour is visible to the
   user rather than hidden.
+
+WHAT THE EXTENSION READS AND STORES (least-privilege summary):
+
+- The content script reads only the time-related properties of <video> elements
+  (currentTime, buffered ranges, currentSrc) to keep the panel state in sync.
+  No page text, form fields, links, images or URL paths are read.
+- chrome.storage.local holds exactly two keys: lastDelayMs (the slider value, an
+  integer) and enhancedOrigins (the origins of sites where the user explicitly
+  granted the optional per-site permission). The latter is the bookkeeping
+  Chromium requires to re-register the document_start script, not a browsing log;
+  it contains no page titles, URLs or timestamps, and stays empty unless the user
+  opts in.
+- The package bundles all of its code and calls no external service: no CDN, no
+  fonts, no analytics, no remote scripts. The only network traffic it can cause is
+  the browser re-fetching the page's own media stream in the optional bidirectional
+  mode, on pages that do not use MSE — same URL the player already uses, and only
+  after the user asks for it. No audio is recorded, written to disk or transmitted.
 ```
 
 > 如果审核员所在地区的 YouTube 不可访问，**换一个你自建的公网测试页**（一个 `<video>` 标签 + 一个公开可用的 MP4 即可），把 URL 写进说明。这比让审核员自己找视频稳妥得多。
@@ -485,11 +518,11 @@ ABOUT THE OPTIONAL BIDIRECTIONAL MODE (the small button on the panel):
 - [ ] 四档图标齐全：16 / 32 / 48 / 128
 - [ ] `node tools/package.js` 通过，**上传的是 `dist/audio-delay-sync-1.0.2-store.zip`**
 - [ ] **在真实 Edge 里完整跑通一次**：播放 → 点图标 → 接管 → 调延迟 → 停止
-- [ ] 截图 / 推广图 / logo 齐全
+- [ ] 截图 / 推广图 / logo 齐全，**且用的是 2026-10-23 重绘版**（标题为新名、含「模式」行）
 - [ ] 隐私政策已部署，URL 可访问
 - [ ] **5 项权限**理由逐条填写（提交包里没有 `debugger`，若表单里出现它说明传错了包）
 - [ ] 第三方库声明：选 **No**（提交包不含 mux.js 等任何第三方代码）
-- [ ] Certification notes 已填写，且明确写了「必须先播放音频」
+- [ ] Certification notes 已填写，且明确写了「必须先播放音频」与「读了什么 / 存了什么」
 - [ ] 搜索词 ≤ 7 个
 
 ---

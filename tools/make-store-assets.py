@@ -116,7 +116,10 @@ def draw_icon(img, x, y, size):
 # 尺寸取自 content.js：268 宽，头部 34，body 各控件按 CSS 像素
 
 PANEL_W = 268
-PANEL_H = 176
+# 头部 34 + 正文 151（读数 / 滑块 / 步进 / 模式 / 电平 / 底栏）。
+# 这六行与 ads-template.js 的真实结构一一对应：商店要求示意图与实际功能一致，
+# 少画一行「模式 + 启用双向」就等于把一个功能从图里删掉了。
+PANEL_H = 186
 
 
 def draw_panel(img, x, y, k, ms, active=True, meter=0.62):
@@ -135,7 +138,7 @@ def draw_panel(img, x, y, k, ms, active=True, meter=0.62):
     cy = y + head_h / 2
     d.ellipse([S(x + 13 * k), S(cy - 3 * k), S(x + 19 * k), S(cy + 3 * k)],
               fill=C["ok"] if active else C["faint"])
-    text(d, (x + 26 * k, cy), "音画偏移", 11.5 * k, C["text"], anchor="lm")
+    text(d, (x + 26 * k, cy), "音画不同步调节器", 11.5 * k, C["text"], anchor="lm")
     text(d, (x + W - 20 * k, cy), "×", 13 * k, C["dim"], anchor="mm")
     text(d, (x + W - 38 * k, cy), "−", 13 * k, C["dim"], anchor="mm")
 
@@ -175,14 +178,27 @@ def draw_panel(img, x, y, k, ms, active=True, meter=0.62):
                             radius=S(4 * k), fill=(34, 39, 46), outline=(48, 54, 62), width=max(1, S(0.5)))
         text(d, (bx + btn_w / 2, btn_y + btn_h / 2), label, 10.5 * k, C["dim"], anchor="mm")
 
-    met_y = body_y + 87 * k
+    # 模式行：左边模式标签，右边「启用双向」按钮（对应源码 .mode）
+    mode_y = body_y + 84 * k
+    tag_w, tag_h = 34 * k, 16 * k
+    d.rounded_rectangle([S(x + pad), S(mode_y), S(x + pad + tag_w), S(mode_y + tag_h)],
+                        radius=S(4 * k), fill=(28, 32, 38))
+    text(d, (x + pad + tag_w / 2, mode_y + tag_h / 2), "延迟", 10 * k, C["dim"], anchor="mm")
+
+    mb_w, mb_h = 58 * k, 16 * k
+    mbx = x + W - pad - mb_w
+    d.rounded_rectangle([S(mbx), S(mode_y), S(mbx + mb_w), S(mode_y + mb_h)],
+                        radius=S(4 * k), fill=C["panel"], outline=(52, 58, 66), width=max(1, S(0.6)))
+    text(d, (mbx + mb_w / 2, mode_y + mb_h / 2), "启用双向", 10 * k, C["dim"], anchor="mm")
+
+    met_y = body_y + 108 * k
     d.rounded_rectangle([S(x + pad), S(met_y), S(x + pad + inner_w), S(met_y + 2 * k)],
                         radius=S(1 * k), fill=(42, 47, 54))
     if active:
         d.rounded_rectangle([S(x + pad), S(met_y), S(x + pad + inner_w * meter), S(met_y + 2 * k)],
                             radius=S(1 * k), fill=C["ok"])
 
-    foot_y = body_y + 100 * k
+    foot_y = body_y + 120 * k
     text(d, (x + pad, foot_y + 5 * k), "悬停面板后 ←→ 微调", 10 * k, C["faint"], anchor="lm")
 
     stop_w, stop_h = 46 * k, 20 * k
@@ -283,24 +299,32 @@ def screenshot_panel():
     text(d, (80, 146), "没有第二个弹窗，点图标接管，所有调节都在这里", 15, C["dim"])
 
     k = 1.75
-    px, py = 80, 230
+    px, py = 80, 215
     draw_panel(img, px, py, k, 2400)
     pw, ph = PANEL_W * k, PANEL_H * k
 
-    marks = [
-        (py + (34 + 20) * k, "延迟读数", "拖动后立刻变化，单位是秒"),
-        (py + (34 + 44) * k, "滑块", "0 ~ 10 秒，松手即生效"),
-        (py + (34 + 58) * k, "步进按钮", "100 毫秒 / 1 秒 精调，归零一键回原点"),
-        (py + (34 + 87) * k, "电平条", "绿色在跳，才说明真的出声了"),
-        (py + (34 + 100) * k, "停止", "声音立刻回到页面，不留后台"),
+    # (正文内的纵向位置, 标题, 说明)：数值取 draw_panel 里各控件的中线，
+    # 引线起点对得准；文字位置在下面循环里按最小行距往下推，避免六行挤在一起。
+    rows = [
+        (20, "延迟读数", "拖动后立刻变化，单位是秒"),
+        (44, "滑块", "0 ~ 10 秒，松手即生效"),
+        (68, "步进按钮", "100 毫秒 / 1 秒 精调，归零回原点"),
+        (92, "模式", "默认只能延后，双向才可提前"),
+        (109, "电平条", "绿色在跳，才说明真的出声了"),
+        (130, "停止", "声音立刻回到页面，不留后台"),
     ]
 
     lx = px + pw + 74
-    for my, title, desc in marks:
-        d.ellipse([S(px + pw + 8), S(my - 3), S(px + pw + 14), S(my + 3)], fill=C["accent"])
-        d.line([(S(px + pw + 14), S(my)), (S(lx - 16), S(my))], fill=(40, 60, 70), width=max(1, S(0.8)))
-        text(d, (lx, my - 9), title, 15, C["text"], bold=True)
-        text(d, (lx, my + 11), desc, 12.5, C["dim"])
+    last = -1e9
+    for off, title, desc in rows:
+        ey = py + (34 + off) * k
+        # 六行比原来的五行密，行距小于 42 就会「标题压上一条说明」，所以下限放大
+        ly = max(ey, last + 42)
+        last = ly
+        d.ellipse([S(px + pw + 8), S(ey - 3), S(px + pw + 14), S(ey + 3)], fill=C["accent"])
+        d.line([(S(px + pw + 14), S(ey)), (S(lx - 16), S(ly))], fill=(40, 60, 70), width=max(1, S(0.8)))
+        text(d, (lx, ly - 9), title, 14, C["text"], bold=True)
+        text(d, (lx, ly + 12), desc, 12, C["dim"])
 
     return img
 
@@ -318,7 +342,7 @@ def promo(w, h, k):
     draw_icon(img, ix, iy, isz)
 
     title_size = max(15, h * 0.072)
-    text(d, (ix, iy + isz + h * 0.10), "音画偏移", title_size, C["text"], bold=True)
+    text(d, (ix, iy + isz + h * 0.10), "音画不同步调节器", title_size, C["text"], bold=True)
     text(d, (ix, iy + isz + h * 0.10 + title_size * 1.45), "标签页音频延迟", max(10, h * 0.040), C["accent"])
 
     pk = max(0.42, h / 540.0)
