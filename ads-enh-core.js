@@ -239,6 +239,25 @@
     AD_SAMPLE_QUIET_MS: 1200, /* 两边缓冲都静止这么久，差值才可信 */
     AD_RESAMPLE_MS: 45000,    /* 广告结束后允许重采样的窗口 */
     AD_CATCHUP_MS: 20000,     /* 广告后允许音频硬跳到画面位置的窗口 */
+
+    /* ---- 各链路的「等多久算失败」----
+       这几个数原来散在 route.js 的三个 setTimeout 里，改一个很容易漏掉另一个。
+       链路③ 最长：CDN 对第二路请求偶尔会长时间不吐数据（实测过），10 秒会误判。 */
+    MSE_READY_MS: 4000,       /* 链路① 这么久还没截到可用音频就放弃 */
+    CAP_READY_MS: 12000,      /* 链路② 这么久抓不到切片就退到「再拉一路」 */
+    SRC_READY_MS: 15000,      /* 链路③ 重新拉一路的超时 */
+
+    /* ---- 节奏类 ---- */
+    STALL_TOAST_MS: 20000,    /* 「等缓冲」提示冷却：网络差导致连环等待时不刷屏 */
+    POS_JUMP_MS: 800,         /* 落后时两次硬跳的最小间隔（core 侧） */
+    POS_JUMP_SYNC_MS: 1500,   /* 同上，sync 侧：每拍都试，真正跳要隔这么久 */
+    PUB_MS: 1000,             /* adsState 前台刷新间隔 */
+    PUB_HIDDEN_MS: 5000,      /* 同上，页面在后台时 */
+    WATCH_MS: 400,            /* 页面类型轮询的起始间隔 */
+    WATCH_BACKOFF: 1.25,      /* 每次没结论就把间隔乘这么多 */
+    WATCH_MAX_MS: 3000,       /* 退避上限 */
+    WATCH_GIVEUP_MS: 30000,   /* 没有 video 的框架等这么久就放弃 */
+    WATCH_UNKNOWN_MS: 60000,  /* 有 video 但一直没地址，最多等这么久 */
     MAX_OFFSET_SHIFT_S: 180,  /* 重采样允许的最大偏移跳变（广告时长上限） */
     FEEDING_MS: 3000,         /* 多久内有新音频解出，就算「数据在来」 */
     SWAP_HINT_MS: 10000,      /* 面板上「播放源切换中」停留多久 */
@@ -351,21 +370,32 @@
     }
   };
 
+  /** 页面是不是自己在用 MSE（video.src 是 blob: / srcObject 是 MediaSource）。
+   *  是的话链路① 能直接复用它的 appendBuffer 片段，不用再下一路。
+   *  @returns {boolean} */
   function pageIsMSE() {
     return pageKind() === 'mse';
   }
 
+  /** 这个包带不带抓切片能力。上架版 ADS_BUILD.capture=false，链路② 整个不存在。
+   *  @returns {boolean} */
   function captureEnabled() {
     const b = globalThis.ADS_BUILD;
     return !(b && b.capture === false);
   }
 
+  /** 链路标识转序号，面板左边那个 ①②③ 用它。
+   *  @param {string} key 'mse' | 'capture' | 'src'
+   *  @returns {string} */
   function routeId(key) {
     const list = ROUTE_ORDER.filter(function (k) { return k !== 'capture' || captureEnabled(); });
     const i = list.indexOf(key);
     return i < 0 ? '' : ROUTE_IDS[i];
   }
 
+  /** 选链路。优先级：① 页面的 MSE 片段 → ② 调试协议抓切片 → ③ 自己再拉一路。
+   *  @param {string} [kind] 页面类型，已算过就传进来，省一次 video 扫描
+   *  @returns {'mse'|'capture'|'src'|''} 空串 = 这页没得选 */
   function pickRoute(kind) {
     if (S.hookReady && S.chunks.length) return 'mse';
     /* 这里不再看 typeof muxjs：mux.js 改成进链路② 之前按需注入
@@ -378,6 +408,8 @@
     return '';
   }
 
+  /** 这页为什么用不了双向，给用户看的一句话（面板/提示里直接用）。
+   *  @returns {string} */
   function whyNoEnhanced() {
     switch (pageKind()) {
       case 'none':
@@ -393,6 +425,8 @@
     }
   }
 
+  /** MAIN world 截到一段 MSE 片段时调这里入队，真正的 append 交给 pump()。
+   *  @param {Uint8Array|ArrayBuffer} buf */
   function pushChunk(buf) {
     if (!(buf instanceof ArrayBuffer) || !buf.byteLength) return;
 
@@ -416,6 +450,9 @@
     pump();
   }
 
+  /** 把队列里的片段按序 append 进 SourceBuffer。
+   *  SourceBuffer 同一时刻只能有一个 append，所以用 S.trimBusy 串行化；
+   *  空闲时调用是 no-op，可以随便多调。 */
   function pump() {
     if (!S.enhBuf || S.enhBuf.updating || !S.appendQueue.length) return;
     if (S.enhMS && S.enhMS.readyState !== 'open') return;
@@ -441,6 +478,9 @@
     }
   }
 
+  /** 目标时刻是否已经在缓冲里（能立刻 seek 过去）。
+   *  @param {number} t 秒
+   *  @returns {boolean} */
   function bufferedHas(t) {
     if (!S.enhAudio) return false;
     const b = S.enhAudio.buffered;
@@ -450,6 +490,9 @@
     return false;
   }
 
+  /** 从 t 起往后还有多少秒连续缓冲 —— 也就是「还能再提前多少」。
+   *  @param {number} t 秒
+   *  @returns {number} 秒；-999 是「一段缓冲都没有」的哨兵值 */
   function bufferedLead(t) {
     if (!S.enhAudio) return -999;
     const b = S.enhAudio.buffered;
@@ -466,6 +509,8 @@
     return -nearest;
   }
 
+  /** 缓冲的最大末尾（不是最近的末尾，调用方注意方向判断）。
+   *  @returns {number} 秒；没有缓冲时返回 0 */
   function bufferedEnd() {
     if (!S.enhAudio) return 0;
     const b = S.enhAudio.buffered;
@@ -550,6 +595,7 @@
     S.vEndSeenAt = 0;
   }
 
+  /** 重置以视频为基准的时钟基线（换源 / 跳转后调用），下一次采样重新起算。 */
   function resetVideoClock() {
     S.vFreezePos = null;
     S.vFreezeAt = 0;
@@ -657,6 +703,10 @@
     if (Math.abs(med - S.ptsOffset) > 0.02) S.ptsOffset = med;
   }
 
+  /** 让 <audio> 追上目标位置：差得远就 seek，差得少就靠 ±10% 倍速磨。
+   *  只对「落后」硬跳；领先时往回 seek 到未缓冲区间会立刻 underflow。
+   *  @param {number} want 目标时刻（秒，音频自己的时间轴）
+   *  @returns {boolean|undefined} false = 这一次明确没能对齐 */
   function alignAudio(want) {
     const drift = S.enhAudio.currentTime - want;
     const abs = Math.abs(drift);
@@ -681,7 +731,7 @@
          立刻摆 —— 不摆的话只能靠 0.9 倍速磨，1.6 秒要磨 16 秒，
          听感就是「点了归零，声音还慢一截」。 */
       if (S.enhMode === 'capture') {
-        if (Date.now() - S.lastPosJump > 800) {
+        if (Date.now() - S.lastPosJump > C.POS_JUMP_MS) {
           if (trySetAudioPos(want)) { S.lastPosJump = Date.now(); return true; }
         }
         /* 摆不过去 = 目标点既不在缓冲里、也不在 seekable 里。
@@ -724,6 +774,10 @@
     try { S.enhMS.duration = next; } catch (e) {}
   }
 
+  /** 硬 seek 到 t。目标点没有缓冲时也会设 currentTime，
+   *  让元素进入 seeking，等切片 append 进来从这里续播。
+   *  @param {number} t 秒
+   *  @returns {boolean} 设进去了没有 */
   function seekAudioTo(t) {
     if (!S.enhAudio) return false;
     ensureSeekRange(t);
@@ -758,6 +812,7 @@
     try { S.enhAudio.currentTime = t; return true; } catch (e) { return false; }
   }
 
+  /** 回收播放位置之前的 MSE 缓冲。MSE 不会自己释放，不删就一路攒着。 */
   function trimBuffer() {
     if (!S.enhBuf || !S.enhMS || S.enhMS.readyState !== 'open') return;
     if (S.enhBuf.updating || S.trimBusy) return;
@@ -797,6 +852,8 @@
     }
   }
 
+  /** 当前面板上的延迟值（毫秒）。负值 = 声音提前，正值 = 声音延后。
+   *  @returns {number} */
   function currentMs() {
     return S.ui ? S.ui.getValue() : 0;
   }
@@ -831,6 +888,8 @@
     return base + (S.enhanced ? C.LOOP_COMP : 0);
   }
 
+  /** 当前「音频该播到哪一秒」（音频自己的时间轴，已含链路② 的 PTS 补偿和回路补偿）。
+   *  @returns {number} */
   function wantTime() {
     return wantAt(currentMs());
   }
@@ -922,10 +981,14 @@
     }
   }
 
+  /** 把延迟下发给 offscreen（唯一入口，所有写 DelayNode 的路径都走这里）。
+   *  @param {boolean} transient true = 不持久化（归零/临时旁路用）
+   *  @param {number} [ms] 省略时用 currentMs() */
   function syncDelayToSw(transient, ms) {
     pushDelay(ms == null ? currentMs() : ms, transient);
   }
 
+  /** 临时把 DelayNode 归零（负值分支用：提前量交给 <audio>，管子不该再延后）。 */
   function bypassCaptureDelay() {
     pushDelay(0, true);
   }

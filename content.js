@@ -96,12 +96,18 @@
     try { window.parent.postMessage({ __ads: true, type: FRAME_VIDEO }, '*'); } catch (e) {}
   }
 
-  /* 面板可能在 video 出现之前就被要求显示（播放器还没插入），所以持续观察一段时间 */
+  /* 面板可能在 video 出现之前就被要求显示（播放器还没插入），所以持续观察一段时间。
+     ANNOUNCE_POLL_MS 要够快：播放器插入 video 后一两帧内就得报到，
+     否则父框架已经抢着画了兜底面板；ANNOUNCE_GIVEUP_MS 是上限 ——
+     过了这么久还没有 video，说明这一层确实没有播放器（典型是空 iframe）。 */
+  const ANNOUNCE_POLL_MS = 600;
+  const ANNOUNCE_GIVEUP_MS = 40000;
+
   const announceTimer = setInterval(function () {
     announceVideo();
     if (announced) clearInterval(announceTimer);
-  }, 600);
-  setTimeout(function () { clearInterval(announceTimer); }, 40000);
+  }, ANNOUNCE_POLL_MS);
+  setTimeout(function () { clearInterval(announceTimer); }, ANNOUNCE_GIVEUP_MS);
 
   function onFrameMessage(ev) {
     const d = ev.data;

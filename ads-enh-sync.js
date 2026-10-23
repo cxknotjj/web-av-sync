@@ -110,7 +110,7 @@
       S.stallLead = bufferedLead(wantTime());
       /* 全屏时面板多半被收起，画面突然停住得有句话解释，不然像卡死了。
          一次等待只弹一条，且 20 秒冷却 —— 网络差导致连环等待时不刷屏。 */
-      if (S.ui && Date.now() - S.lastStallToast > 20000) {
+      if (S.ui && Date.now() - S.lastStallToast > C.STALL_TOAST_MS) {
         S.lastStallToast = Date.now();
         S.ui.showToast('缓冲跟不上提前量，画面暂停等待下载…');
       }
@@ -417,7 +417,7 @@
         hasBuffered: S.enhAudio.buffered.length > 0,
         currentLead: bufferedLead(cur)
       });
-      if (aimPlan === 'jump' && Date.now() - S.lastPosJump > 1500) {
+      if (aimPlan === 'jump' && Date.now() - S.lastPosJump > C.POS_JUMP_SYNC_MS) {
         /* 落后，而且目标点还没缓冲到 —— 位置先过去（seekable 已经被
            ensureSeekRange 撑到那儿），等切片 append 进来就从这里续播。
            老代码是挪到 bufferedEnd()-0.25：那等于把音频扔到缓冲区最边上，
@@ -455,7 +455,7 @@
        标签页在后台时没人看也没人排查，降到 5 秒 —— 一次发布要选 video、
        绕一遍缓冲区间、整包 JSON.stringify + 写 dataset，
        多个标签页同时挂着时这笔开销是白给的。 */
-    const pubGap = document.hidden ? 5000 : 1000;
+    const pubGap = document.hidden ? C.PUB_HIDDEN_MS : C.PUB_MS;
     if (Date.now() - lastPubAt > pubGap) {
       lastPubAt = Date.now();
       publishState();

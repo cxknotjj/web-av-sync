@@ -116,8 +116,9 @@
     slider.value = String(currentMs);
     num.textContent = (currentMs / 1000).toFixed(3);
     num.className = 'num' + (currentMs !== 0 ? ' pos' : '');
-    /* 滑块物理范围固定 -10000..10000，0 点落在 50% */
-    const pct = (currentMs + 10000) / 20000 * 100;
+    /* 滑块物理范围就是 MIN_ENH_MS..MAX_MS（见 ads-template.js 的 input），
+       0 点落在 50% */
+    const pct = (currentMs - MIN_ENH_MS) / (MAX_MS - MIN_ENH_MS) * 100;
     slider.style.setProperty('--lo', Math.min(pct, 50).toFixed(2) + '%');
     slider.style.setProperty('--hi', Math.max(pct, 50).toFixed(2) + '%');
   }

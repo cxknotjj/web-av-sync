@@ -272,12 +272,12 @@
      改成退避 + 期限：间隔从 400ms 逐步放到 3s，30 秒还没有 video 就放弃；
      有 video 但一直没地址的（unknown）最多等 60 秒。 */
   let watchStart = 0;
-  let watchDelay = 400;
+  let watchDelay = C.WATCH_MS;
 
   function startModeWatch() {
     if (S.modeTimer) return;
     watchStart = Date.now();
-    watchDelay = 400;
+    watchDelay = C.WATCH_MS;
     scheduleWatch();
   }
 
@@ -297,12 +297,12 @@
       const age = Date.now() - watchStart;
       if (!S.hookInstalled || S.hookReady || S.enhanced ||
           (k !== 'unknown' && k !== 'none') ||
-          (k === 'none' && age > 30000) || age > 60000) {
+          (k === 'none' && age > C.WATCH_GIVEUP_MS) || age > C.WATCH_UNKNOWN_MS) {
         stopModeWatch();
         return;
       }
 
-      watchDelay = Math.min(3000, Math.round(watchDelay * 1.25));
+      watchDelay = Math.min(C.WATCH_MAX_MS, Math.round(watchDelay * C.WATCH_BACKOFF));
       scheduleWatch();
     }, watchDelay);
   }

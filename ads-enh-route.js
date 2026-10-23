@@ -28,32 +28,51 @@
   const { paintRoute } = E.panel;
   const L = E.life;
 
+  /* ---------------- 三条链路共用的搭建动作 ----------------
+   * 三处 <audio> + MediaSource + 「等能出声」的写法原来各写一遍，
+   * 细节已经开始分叉（有一处忘了等 canplay，有一处漏了移除旧节点）。
+   * 收成三个小函数：建元素 / 接 MSE / 等 canplay。 */
+
+  /** 建一条隐藏的 <audio> 挂到页面根上，并登记到 S。 */
+  function createEnhAudio() {
+    const a = document.createElement('audio');
+    a.style.display = 'none';
+    document.documentElement.appendChild(a);
+    S.enhAudio = a;
+    return a;
+  }
+
+  /** 建 <audio> 并接上一条新的 MediaSource，返回那个 MediaSource。 */
+  function createEnhAudioMSE() {
+    const a = createEnhAudio();
+    S.enhMS = new MediaSource();
+    a.src = URL.createObjectURL(S.enhMS);
+    return S.enhMS;
+  }
+
+  /** 等它真的能出声：两个事件都等 —— loadedmetadata 可能先到但缓冲还空着，
+   *  canplay 才是「真的有数据」。enhGuard 已被清掉（落定或失败）时不再回调。 */
+  function whenCanPlay(onReady) {
+    const tryReady = function () {
+      if (!S.enhGuard) return;
+      if (S.enhAudio.buffered.length || isFinite(S.enhAudio.duration)) onReady();
+    };
+    S.enhAudio.addEventListener('loadedmetadata', tryReady);
+    S.enhAudio.addEventListener('canplay', tryReady);
+  }
+
   function startMseReuse(v) {
     S.enhMode = 'mse';
     S.videoEl = v;
     paintRoute();
 
-    S.enhAudio = document.createElement('audio');
-    S.enhAudio.style.display = 'none';
-    document.documentElement.appendChild(S.enhAudio);
-
-    S.enhMS = new MediaSource();
     /* 标记一下，inject-main 那边看到就会跳过，避免自己截自己 */
-    S.enhMS.__adsOwn = true;
-    S.enhAudio.src = URL.createObjectURL(S.enhMS);
+    createEnhAudioMSE().__adsOwn = true;
 
     S.enhGuard = setTimeout(function () {
       L.fail('没截到可用的音频数据，已放弃双向模式，视频声音保持原样。');
-    }, 4000);
-
-    /* 两个事件都等：loadedmetadata 可能先到但 buffer 还空着，
-       canplay 才是「真的能出声」，所以只在有数据时才落定。 */
-    const tryReady = function () {
-      if (!S.enhGuard) return;
-      if (S.enhAudio.buffered.length || isFinite(S.enhAudio.duration)) L.ready();
-    };
-    S.enhAudio.addEventListener('loadedmetadata', tryReady);
-    S.enhAudio.addEventListener('canplay', tryReady);
+    }, C.MSE_READY_MS);
+    whenCanPlay(L.ready);
 
     S.enhMS.addEventListener('sourceopen', function () {
       try {
@@ -102,16 +121,12 @@
       if (S.ui) S.ui.showToast('没抓到切片，已改为重新拉一路（约多一倍流量）');
     };
 
-    S.enhAudio = document.createElement('audio');
-    S.enhAudio.style.display = 'none';
-    document.documentElement.appendChild(S.enhAudio);
+    createEnhAudioMSE();
 
-    S.enhMS = new MediaSource();
-    S.enhAudio.src = URL.createObjectURL(S.enhMS);
-
-    /* 12 秒还抓不到就退到「再拉一路」。中间过程对用户不可见。
-       captureStop 由 fallback → enhFail 统一发，这里不要重复发。 */
-    S.enhGuard = setTimeout(fallback, 12000);
+    /* 还抓不到就退到「再拉一路」。中间过程对用户不可见。
+       captureStop 由 fallback → enhFail 统一发，这里不要重复发。
+       （链路② 不等 canplay：它的落定走「解出第一段音频」那条路，见 onSegChunk） */
+    S.enhGuard = setTimeout(fallback, C.CAP_READY_MS);
 
     S.enhMS.addEventListener('sourceopen', function () {
       try {
@@ -158,23 +173,12 @@
     resetStream();
     paintRoute();
 
-    S.enhAudio = document.createElement('audio');
-    S.enhAudio.style.display = 'none';
-    document.documentElement.appendChild(S.enhAudio);
-    S.enhAudio.src = v.currentSrc || v.src;
+    createEnhAudio().src = v.currentSrc || v.src;
 
-    /* 放宽到 15 秒：CDN 对第二路请求偶尔会长时间不吐数据（实测过），
-       10 秒会误判失败。 */
     S.enhGuard = setTimeout(function () {
       L.fail('音频流加载超时，已放弃双向模式，视频声音保持原样。');
-    }, 15000);
-
-    const tryReady = function () {
-      if (!S.enhGuard) return;
-      if (S.enhAudio.buffered.length || isFinite(S.enhAudio.duration)) L.ready();
-    };
-    S.enhAudio.addEventListener('loadedmetadata', tryReady);
-    S.enhAudio.addEventListener('canplay', tryReady);
+    }, C.SRC_READY_MS);
+    whenCanPlay(L.ready);
   }
 
   /* ---------------- 链路② 的转换层 ----------------

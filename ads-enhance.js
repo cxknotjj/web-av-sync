@@ -34,7 +34,17 @@
   const { syncTick, onVideoSeek } = E.sync;
   const { enterEnhanced } = E.route;
 
-  function enhFail(msg, then) {
+  /** 一次接管的统一收场：销毁音频元素、摘监听、复位状态、把延迟还给 DelayNode。
+   *
+   *  以前 enhFail 和 exitEnhanced 各写一遍，约 60 行几乎逐行相同 —— 而且已经
+   *  分叉过：老代码在 enhFail 里对已经置 null 的 enhAudio 写 playbackRate，
+   *  每次都抛一个被吞掉的 TypeError。合成一处之后，这种「只改了一份」的
+   *  事故不会再发生。
+   *
+   *  @param {boolean} keepWhy 保留 routeWhy（失败降级要把原因留在面板上），
+   *                           正常退出则清空
+   */
+  function teardown(keepWhy) {
     if (S.enhGuard) { clearTimeout(S.enhGuard); S.enhGuard = null; }
 
     /* 抓切片这一路失败时也要把调试会话拆掉。漏了这一步的话浏览器顶部
@@ -45,6 +55,14 @@
         chrome.runtime.sendMessage({ target: 'sw', type: 'captureStop' }).catch(function () {});
       } catch (e) {}
     }
+
+    if (!keepWhy) S.routeWhy = '';
+
+    /* 先停表：清理过程中 syncTick 再跑一拍，会拿到半拆状态 */
+    if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
+    /* 顺序有讲究：先与 enhanced / enhMode 脱钩，后面的清理才不会被当成「正在接管」 */
+    S.enhMode = '';
+    S.enhanced = false;
 
     if (S.enhAudio) {
       try { S.enhAudio.pause(); } catch (e) {}
@@ -68,8 +86,6 @@
     S.muxer = null;
     S.lastPosJump = 0;
     resetStream();
-    S.enhMode = '';
-    S.enhanced = false;
 
     if (S.videoEl) {
       if (S.guardMute) {
@@ -80,6 +96,8 @@
         try { S.videoEl.removeEventListener('seeking', S.seekHandler, true); } catch (e) {}
         S.seekHandler = null;
       }
+      /* 只恢复「我们改过的那一份」：用户本来静音、或中途自己点了静音，
+         退出后不该被突然外放。必须在摘掉守卫之后恢复，顺序反了会被按回去。 */
       if (S.mutedByUs) {
         try { S.videoEl.muted = S.prevMuted; } catch (e) {}
         S.mutedByUs = false;
@@ -89,8 +107,7 @@
       if (S.stalledByUs) {
         S.stalledByUs = false;
         S.stallSince = 0;
-        /* 这里别碰 enhAudio：上面已经把它置 null 销毁了（老代码在这里
-           写 enhAudio.playbackRate = 1，永远只抛一个被吞掉的 TypeError）。 */
+        /* 这里别碰 enhAudio：上面已经把它置 null 销毁了 */
         try {
           const p = S.videoEl.play();
           if (p && p.catch) p.catch(function () {});
@@ -99,13 +116,20 @@
       S.videoEl = null;
     }
 
-    if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
-    if (S.ui) S.ui.setEnhanced(false);
-
+    if (S.ui) {
+      /* setEnhanced(false) 会把负值钳回 0（minMs 归零），钳完要同步给
+         tabCapture 那条链路，否则面板写着 0.000、听起来还是旧延迟 */
+      S.ui.setEnhanced(false);
+    }
     updateModeUI();
-    if (msg && S.ui) S.ui.showToast(msg);
     resetCapturePipe();
     syncDelayToSw(true);
+  }
+
+  function enhFail(msg, then) {
+    /* 失败往往带着降级原因（route.fallback 会先写 routeWhy），别清掉 */
+    teardown(true);
+    if (msg && S.ui) S.ui.showToast(msg);
     if (typeof then === 'function') then();
   }
 
@@ -151,79 +175,9 @@
     syncTick();
   }
 
+  /** 用户主动退出（点「停止」或再点一次按钮）：原因不留，其余与失败同路 */
   function exitEnhanced() {
-    if (S.enhGuard) { clearTimeout(S.enhGuard); S.enhGuard = null; }
-
-    /* 调试通道用完立刻拆掉，黄条不该留在页面上 */
-    if (S.enhMode === 'capture') {
-      chrome.runtime.sendMessage({ target: 'sw', type: 'captureStop' }).catch(function () {});
-    }
-
-    S.enhMode = '';
-    S.routeWhy = '';
-
-    if (S.enhAudio) {
-      try { S.enhAudio.pause(); } catch (e) {}
-      try { S.enhAudio.removeAttribute('src'); S.enhAudio.load(); } catch (e) {}
-      try { S.enhAudio.remove(); } catch (e) {}
-    }
-    S.enhAudio = null;
-    S.enhMS = null;
-    S.enhBuf = null;
-    S.appendQueue = [];
-    S.capInitDone = false;
-    S.capBytes = 0;
-    S.seekAt = 0;
-    S.trimBusy = false;
-    /* 链路② 的三个状态也要归位：audioSilent 不清，下次进双向会被当成
-       「正在静音」而跳过第一拍的出声；muxer 留着的话，新一路流的 PTS
-       接着旧状态走，第一批切片就会转错。 */
-    S.audioSilent = false;
-    S.silentSince = 0;
-    S.capSeekBytes = 0;
-    S.muxer = null;
-    S.lastPosJump = 0;
-    resetStream();
-
-    if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
-
-    if (S.videoEl) {
-      if (S.guardMute) {
-        try { S.videoEl.removeEventListener('volumechange', S.guardMute, true); } catch (e) {}
-        S.guardMute = null;
-      }
-      if (S.seekHandler) {
-        try { S.videoEl.removeEventListener('seeking', S.seekHandler, true); } catch (e) {}
-        S.seekHandler = null;
-      }
-      if (S.mutedByUs) {
-        try { S.videoEl.muted = S.prevMuted; } catch (e) {}
-        S.mutedByUs = false;
-      }
-      /* 等缓冲时被拆掉（用户点了停止、或者链路降级），画面还停在暂停上，
-         必须放开 —— 不然后台一拆，用户的视频就永远停住了 */
-      if (S.stalledByUs) {
-        S.stalledByUs = false;
-        S.stallSince = 0;
-        /* 这里别碰 enhAudio：上面已经把它置 null 销毁了（老代码在这里
-           写 enhAudio.playbackRate = 1，永远只抛一个被吞掉的 TypeError）。 */
-        try {
-          const p = S.videoEl.play();
-          if (p && p.catch) p.catch(function () {});
-        } catch (e) {}
-      }
-      S.videoEl = null;
-    }
-
-    S.enhanced = false;
-    if (S.ui) {
-      /* setEnhanced(false) 会把负值钳回 0（minMs 归零），钳完要同步给
-         tabCapture 那条链路，否则面板写着 0.000、听起来还是旧延迟 */
-      S.ui.setEnhanced(false);
-    }
-    updateModeUI();
-    resetCapturePipe();
-    syncDelayToSw(true);
+    teardown(false);
   }
 
   async function onModeClick() {
